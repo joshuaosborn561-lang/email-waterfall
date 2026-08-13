@@ -87,11 +87,38 @@ Cursor MCP snippet:
 }
 ```
 
-## Railway / Claude web
+## Railway / Claude web (HTTPS)
 
-Dockerfile ships `MCP_TRANSPORT=streamable-http` on port 8000. Connector URL is `https://<host>/mcp`. No connector auth.
+This is the same connector shape as `google-maps-mcp`: **Streamable HTTP at `/mcp`, no auth.**
 
-Required env: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, plus whichever vendor keys you want live (`AI_ARK_API_KEY`, `GETLEADS_API_KEY`, `LEADMAGIC_API_KEY`, optional `FULLENRICH_API_KEY`).
+### Deploy (from this repo)
+
+```bash
+npm i -g @railway/cli
+railway login
+railway init --name email-waterfall
+railway up
+railway domain          # prints https://….up.railway.app
+railway variables set \
+  MCP_TRANSPORT=streamable-http \
+  SUPABASE_URL=https://azpapwtnrbzywlnxxecz.supabase.co \
+  SUPABASE_SERVICE_ROLE_KEY=… \
+  GETLEADS_API_KEY=… \
+  AI_ARK_API_KEY=… \
+  LEADMAGIC_API_KEY=…
+# optional: FULLENRICH_API_KEY=…
+```
+
+Dockerfile already sets `MCP_TRANSPORT=streamable-http` and binds `HOST=0.0.0.0` / `PORT` (Railway injects `PORT`). Health check: `GET /health`.
+
+### Add in Claude
+
+1. **Settings → Connectors → Add custom connector**
+2. URL: `https://<railway-host>/mcp`
+3. Auth: none
+4. Enable the connector in the chat, then ask it to enrich domains for `basco` or `peterson`
+
+Long runs return `job_id` — poll `get_job_status`.
 
 ## Tests
 

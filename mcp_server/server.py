@@ -256,8 +256,9 @@ def _mount_http_routes() -> None:
     async def root_page(_request: Request) -> PlainTextResponse:
         return PlainTextResponse(
             "Email Waterfall MCP\n"
-            "Claude / Cursor connector URL: /mcp\n"
+            "Claude custom connector URL: /mcp\n"
             "Health: /health\n"
+            "Auth: none\n"
         )
 
     @mcp.custom_route("/health", methods=["GET"])
@@ -268,6 +269,11 @@ def _mount_http_routes() -> None:
                 "service": "email-waterfall",
                 "transport": "streamable-http",
                 "mcp_path": "/mcp",
+                "auth": "none",
+                "claude_web": (
+                    "Add this connector in Claude → Settings → Connectors: "
+                    "https://<host>/mcp"
+                ),
             }
         )
 
