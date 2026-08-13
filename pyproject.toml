@@ -1,0 +1,10 @@
+[project]
+name = "email-waterfall"
+version = "1.0.0"
+description = "Standalone MCP service: DM / work-email enrichment waterfall"
+requires-python = ">=3.11"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
