@@ -208,6 +208,76 @@ def test_basco_title_match_skips_sales_manager(monkeypatch) -> None:
     assert sink["contacts"][0]["first_name"] == "Pat"
     assert sink["contacts"][0]["client_tag"] == "basco"
     assert sink["companies_table"] == "basco_companies"
+    ark.find_people.assert_not_called()
+
+
+def test_getleads_runs_before_aiark_for_dm(monkeypatch) -> None:
+    sink: dict = {}
+    gl = _vendor(
+        people=[
+            PersonHit(
+                first_name="Pat",
+                last_name="Director",
+                title="Service Director",
+                source_tier="getleads",
+            )
+        ]
+    )
+    ark = _vendor(
+        people=[
+            PersonHit(
+                first_name="Sam",
+                last_name="Owner",
+                title="Owner",
+                source_tier="aiark",
+            )
+        ]
+    )
+    _patch_clients(
+        monkeypatch, gl=gl, ark=ark, lm=_vendor(enabled=False), fe=_vendor(enabled=False)
+    )
+    _patch_writes(monkeypatch, sink)
+
+    waterfall.enrich_waterfall(
+        [{"domain": "paragonhonda.com", "company_name": "Paragon Honda"}],
+        client_tag="basco",
+        need="dm",
+        require_title_match=True,
+        write_supabase=True,
+    )
+    gl.find_people.assert_called()
+    ark.find_people.assert_not_called()
+    assert sink["contacts"][0]["source_tier"] == "getleads"
+
+
+def test_max_tier_getleads_blocks_aiark(monkeypatch) -> None:
+    sink: dict = {}
+    gl = _vendor(people=[])
+    ark = _vendor(
+        people=[
+            PersonHit(
+                first_name="Pat",
+                last_name="Director",
+                title="Service Director",
+                source_tier="aiark",
+            )
+        ]
+    )
+    _patch_clients(
+        monkeypatch, gl=gl, ark=ark, lm=_vendor(enabled=True), fe=_vendor(enabled=False)
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [{"domain": "paragonhonda.com"}],
+        client_tag="basco",
+        need="dm",
+        max_tier="getleads",
+        write_supabase=True,
+    )
+    ark.find_people.assert_not_called()
+    assert out["vendors_enabled"]["aiark"] is False
+    assert out["max_tier"] == "getleads"
 
 
 def test_duplicate_domain_rows_deduped_before_upsert(monkeypatch) -> None:
@@ -252,7 +322,9 @@ def test_duplicate_domain_rows_deduped_before_upsert(monkeypatch) -> None:
 
 def test_apify_is_not_a_real_tier() -> None:
     assert "apify" not in waterfall.TIER_ORDER
-    assert waterfall.normalize_max_tier("apify") == "aiark"
+    assert waterfall.normalize_max_tier("apify") == "getleads"
+    assert waterfall.TIER_ORDER[0] == "getleads"
+    assert waterfall.TIER_ORDER[1] == "aiark"
 
 
 def test_empty_rows() -> None:

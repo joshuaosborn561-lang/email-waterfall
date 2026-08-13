@@ -1,7 +1,7 @@
 """DM / work-email enrichment waterfall.
 
 Tiers (fixed, no Maps, no website crawl, no Apify):
-  AI Ark (people) → getleads → LeadMagic → FullEnrich (email only, opt-in)
+  getleads → AI Ark (people) → LeadMagic → FullEnrich (email only, opt-in)
 
 Writes to public.{client}_companies / public.{client}_contacts.
 """
@@ -22,9 +22,9 @@ from .vendors.getleads import GetLeadsClient
 from .vendors.leadmagic import LeadMagicClient
 
 Need = Literal["email", "dm", "both"]
-MaxTier = Literal["aiark", "getleads", "leadmagic", "fullenrich"]
+MaxTier = Literal["getleads", "aiark", "leadmagic", "fullenrich"]
 
-TIER_ORDER: list[str] = ["aiark", "getleads", "leadmagic", "fullenrich"]
+TIER_ORDER: list[str] = ["getleads", "aiark", "leadmagic", "fullenrich"]
 TIER_RANK = {name: i for i, name in enumerate(TIER_ORDER)}
 DEFAULT_MAX_TIER: MaxTier = "leadmagic"
 
@@ -38,7 +38,7 @@ def normalize_max_tier(max_tier: str | None) -> str:
         "full-enrich": "fullenrich",
         "get_leads": "getleads",
         "lead_magic": "leadmagic",
-        "apify": "aiark",  # Apify is not in this service; start at first paid tier
+        "apify": "getleads",  # Apify is not in this service; start at first paid tier
     }
     t = aliases.get(t, t)
     if t not in TIER_RANK:
@@ -250,10 +250,10 @@ class Waterfall:
             return best
 
         vendors: list[tuple[str, Any]] = []
-        if self.ai_ark.enabled and self._allowed("aiark"):
-            vendors.append(("aiark", self.ai_ark))
         if self.getleads.enabled and self._allowed("getleads"):
             vendors.append(("getleads", self.getleads))
+        if self.ai_ark.enabled and self._allowed("aiark"):
+            vendors.append(("aiark", self.ai_ark))
         if self.leadmagic.enabled and self._allowed("leadmagic"):
             vendors.append(("leadmagic", self.leadmagic))
 
@@ -531,8 +531,8 @@ def enrich_waterfall(
         "target_titles": titles,
         "require_title_match": bool(require_title_match),
         "vendors_enabled": {
-            "aiark": wf.ai_ark.enabled and wf._allowed("aiark"),
             "getleads": wf.getleads.enabled and wf._allowed("getleads"),
+            "aiark": wf.ai_ark.enabled and wf._allowed("aiark"),
             "leadmagic": wf.leadmagic.enabled and wf._allowed("leadmagic"),
             "fullenrich": wf.fullenrich.enabled and wf._allowed("fullenrich"),
         },

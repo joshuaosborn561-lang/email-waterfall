@@ -90,8 +90,8 @@ def health() -> str:
             "supabase_configured": settings.supabase_configured,
             "supabase_url": settings.supabase_url or None,
             "vendors": {
-                "aiark": bool(settings.ai_ark_api_key),
                 "getleads": bool(settings.getleads_api_key),
+                "aiark": bool(settings.ai_ark_api_key),
                 "leadmagic": bool(settings.leadmagic_api_key),
                 "fullenrich": bool(settings.fullenrich_api_key),
             },
@@ -187,7 +187,7 @@ def enrich_waterfall(
 
     client_tag is required: 'basco' | 'peterson'. Never omit it.
     need = 'dm' | 'email' | 'both'.
-    max_tier = 'aiark' | 'getleads' | 'leadmagic' | 'fullenrich'
+    max_tier = 'getleads' | 'aiark' | 'leadmagic' | 'fullenrich'
     (default 'leadmagic' — FullEnrich never runs unless explicitly requested).
 
     target_titles = comma-separated ranked titles. Empty uses the client default.

@@ -32,7 +32,7 @@ Never omit `client_tag`. Never write to a shared contacts table.
    contacts_written, tier_breakdown. Do not dump contact payloads.
 
 ## Tiers
-AI Ark (people) → getleads → LeadMagic → FullEnrich (email only, only if
+getleads → AI Ark (people only) → LeadMagic → FullEnrich (email only, only if
 `max_tier=fullenrich`). Default max_tier is leadmagic.
 
 ## Input row shape

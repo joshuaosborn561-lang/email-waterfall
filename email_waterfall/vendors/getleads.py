@@ -1,4 +1,4 @@
-"""GetLeads — email finder + people discovery."""
+"""GetLeads — first waterfall tier (email + people discovery)."""
 
 from __future__ import annotations
 

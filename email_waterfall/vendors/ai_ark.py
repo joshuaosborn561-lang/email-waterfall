@@ -1,4 +1,7 @@
-"""AI Ark — people discovery only (never email-to-profile reverse lookup)."""
+"""AI Ark — second waterfall tier, people discovery only.
+
+Never use for email-to-profile reverse lookup. GetLeads runs first.
+"""
 
 from __future__ import annotations
 

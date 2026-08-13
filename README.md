@@ -20,7 +20,7 @@ Peterson titles: Owner, Founder, Principal, President, Partner, CEO, VP, Directo
 ## Waterfall
 
 ```
-AI Ark (people) → getleads → LeadMagic → FullEnrich (email only, opt-in)
+getleads → AI Ark (people only) → LeadMagic → FullEnrich (email only, opt-in)
 ```
 
 `max_tier` default is `leadmagic`. FullEnrich never runs unless you pass `max_tier=fullenrich`.
