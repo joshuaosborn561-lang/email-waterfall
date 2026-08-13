@@ -7,20 +7,24 @@ import os
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
 from mcp_server.playbook import INSTRUCTIONS, WHEN_TO_USE
 
 ROOT = Path(__file__).resolve().parent.parent
 
-try:
-    mcp = FastMCP(
-        name="email-waterfall",
-        instructions=INSTRUCTIONS,
-    )
-except TypeError:
-    mcp = FastMCP("email-waterfall")
+mcp = MCPServer(
+    name="email-waterfall",
+    title="Email Waterfall",
+    description=(
+        "Resolve decision-makers and work emails from company domains via a paid "
+        "vendor waterfall, then write isolated Basco / Peterson rows to Supabase. "
+        "Not a Maps scraper or website crawler."
+    ),
+    instructions=INSTRUCTIONS,
+    version="1.0.0",
+)
 
 
 def _json(data: Any) -> str:

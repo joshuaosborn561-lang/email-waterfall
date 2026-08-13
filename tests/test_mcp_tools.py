@@ -7,12 +7,12 @@ from mcp_server.server import mcp
 
 def test_tool_names() -> None:
     import asyncio
+    import inspect
 
-    async def _names() -> list[str]:
-        tools = await mcp.list_tools()
-        return sorted(t.name for t in tools)
-
-    names = asyncio.run(_names())
+    tools = mcp.list_tools()
+    if inspect.iscoroutine(tools):
+        tools = asyncio.run(tools)
+    names = sorted(t.name for t in tools)
     assert "enrich_waterfall" in names
     assert "health" in names
     assert "get_job_status" in names

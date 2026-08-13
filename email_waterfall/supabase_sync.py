@@ -120,12 +120,12 @@ def dedupe_contacts_with_email(rows: list[dict[str, Any]]) -> list[dict[str, Any
             order.append(key)
             seen[key] = row
         else:
-            # Prefer the row with a title / name.
             prev = seen[key]
-            if (row.get("job_title") or row.get("first_name")) and not (
-                prev.get("job_title") or prev.get("first_name")
-            ):
-                seen[key] = row
+            merged = dict(prev)
+            for k, v in row.items():
+                if v not in (None, "", [], {}):
+                    merged[k] = v
+            seen[key] = merged
     return [seen[k] for k in order]
 
 
