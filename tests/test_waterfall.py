@@ -74,13 +74,9 @@ def test_max_tier_blocks_fullenrich(monkeypatch) -> None:
     fe.find_email_bulk.return_value = [
         EmailHit(email="x@y.com", source_tier="fullenrich")
     ]
-    _patch_clients(
-        monkeypatch,
-        gl=gl,
-        ark=_vendor(enabled=False),
-        lm=_vendor(enabled=True, email=None),
-        fe=fe,
-    )
+    ark = _vendor(enabled=True, email=None)
+    lm = _vendor(enabled=True, email=None)
+    _patch_clients(monkeypatch, gl=gl, ark=ark, lm=lm, fe=fe)
     _patch_writes(monkeypatch, sink)
 
     out = waterfall.enrich_waterfall(
@@ -101,6 +97,8 @@ def test_max_tier_blocks_fullenrich(monkeypatch) -> None:
     assert out["max_tier"] == "leadmagic"
     assert out["client_tag"] == "peterson"
     assert out["contacts_table"] == "peterson_contacts"
+    ark.find_email.assert_called()
+    lm.find_email.assert_called()
     fe.find_email_bulk.assert_not_called()
     fe.find_email.assert_not_called()
     assert out["vendors_enabled"]["fullenrich"] is False
@@ -144,9 +142,8 @@ def test_stops_email_at_getleads(monkeypatch) -> None:
     lm = _vendor(
         email=EmailHit(email="should-not@x.com", source_tier="leadmagic")
     )
-    _patch_clients(
-        monkeypatch, gl=gl, ark=_vendor(enabled=False), lm=lm, fe=_vendor(enabled=False)
-    )
+    ark = _vendor(enabled=True)
+    _patch_clients(monkeypatch, gl=gl, ark=ark, lm=lm, fe=_vendor(enabled=False))
     _patch_writes(monkeypatch, sink)
 
     out = waterfall.enrich_waterfall(
@@ -164,6 +161,7 @@ def test_stops_email_at_getleads(monkeypatch) -> None:
         write_supabase=True,
     )
     assert out["emails_found"] == 1
+    ark.find_email.assert_not_called()
     lm.find_email.assert_not_called()
     assert "csv" not in out and "items" not in out
     assert sink["companies_table"] == "peterson_companies"
@@ -325,6 +323,107 @@ def test_apify_is_not_a_real_tier() -> None:
     assert waterfall.normalize_max_tier("apify") == "getleads"
     assert waterfall.TIER_ORDER[0] == "getleads"
     assert waterfall.TIER_ORDER[1] == "aiark"
+    assert waterfall.TIER_ORDER[2] == "leadmagic"
+
+
+def test_aiark_is_second_email_tier(monkeypatch) -> None:
+    sink: dict = {}
+    gl = _vendor(email=None)
+    ark = _vendor(
+        email=EmailHit(email="pat@paragonhonda.com", source_tier="aiark", status="found")
+    )
+    lm = _vendor(email=EmailHit(email="should-not@x.com", source_tier="leadmagic"))
+    _patch_clients(monkeypatch, gl=gl, ark=ark, lm=lm, fe=_vendor(enabled=False))
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "paragonhonda.com",
+                "first_name": "Pat",
+                "last_name": "Lee",
+                "company_name": "Paragon Honda",
+                "linkedin_url": "https://www.linkedin.com/in/pat-lee",
+                "phone": "2015550100",
+            }
+        ],
+        client_tag="basco",
+        need="email",
+        write_supabase=True,
+    )
+    assert out["emails_found"] == 1
+    gl.find_email.assert_called()
+    ark.find_email.assert_called()
+    kwargs = ark.find_email.call_args
+    assert kwargs.kwargs.get("linkedin_url") == "https://www.linkedin.com/in/pat-lee"
+    assert kwargs.kwargs.get("phone") == "2015550100"
+    lm.find_email.assert_not_called()
+    assert sink["companies"][0]["email_source_tier"] == "aiark"
+
+
+def test_aiark_email_from_linkedin_without_name(monkeypatch) -> None:
+    sink: dict = {}
+    gl = _vendor(email=None)
+    ark = _vendor(
+        email=EmailHit(email="pat@paragonhonda.com", source_tier="aiark", status="found")
+    )
+    lm = _vendor(email=None)
+    _patch_clients(monkeypatch, gl=gl, ark=ark, lm=lm, fe=_vendor(enabled=False))
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "paragonhonda.com",
+                "linkedin_url": "https://www.linkedin.com/in/pat-lee",
+            }
+        ],
+        client_tag="basco",
+        need="email",
+        write_supabase=True,
+    )
+    assert out["emails_found"] == 1
+    gl.find_email.assert_not_called()
+    ark.find_email.assert_called()
+    lm.find_email.assert_not_called()
+
+
+def test_aiark_email_uses_dm_linkedin(monkeypatch) -> None:
+    sink: dict = {}
+    gl = _vendor(
+        email=None,
+        people=[
+            PersonHit(
+                first_name="Pat",
+                last_name="Director",
+                title="Service Director",
+                linkedin_url="https://www.linkedin.com/in/pat-director",
+                source_tier="getleads",
+                raw={"id": "ark-person-1"},
+            )
+        ],
+    )
+    ark = _vendor(
+        email=EmailHit(email="pat@paragonhonda.com", source_tier="aiark", status="found")
+    )
+    _patch_clients(
+        monkeypatch, gl=gl, ark=ark, lm=_vendor(enabled=False), fe=_vendor(enabled=False)
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [{"domain": "paragonhonda.com", "company_name": "Paragon Honda"}],
+        client_tag="basco",
+        need="both",
+        write_supabase=True,
+    )
+    assert out["dms_found"] == 1
+    assert out["emails_found"] == 1
+    ark.find_email.assert_called()
+    assert (
+        ark.find_email.call_args.kwargs.get("linkedin_url")
+        == "https://www.linkedin.com/in/pat-director"
+    )
 
 
 def test_empty_rows() -> None:

@@ -32,12 +32,16 @@ Never omit `client_tag`. Never write to a shared contacts table.
    contacts_written, tier_breakdown. Do not dump contact payloads.
 
 ## Tiers
-getleads → AI Ark (people only) → LeadMagic → FullEnrich (email only, only if
+getleads → AI Ark → LeadMagic → FullEnrich (email only, only if
 `max_tier=fullenrich`). Default max_tier is leadmagic.
 
+AI Ark is second on the email lane too: LinkedIn URL, AI Ark person id,
+name+domain, or phone → verified work email. It is not skipped just because
+a row already has a name.
+
 ## Input row shape
-domain (required), company_name, first_name, last_name, title, email, place_id,
-city, state.
+domain (required), company_name, first_name, last_name, title, email,
+linkedin_url, phone, place_id, city, state.
 """
 
 WHEN_TO_USE = """

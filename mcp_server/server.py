@@ -183,7 +183,7 @@ def enrich_waterfall(
     """Resolve DMs + work emails via paid vendors; write to public.{client}_* tables.
 
     `rows` = JSON list of {domain, company_name?, first_name?, last_name?, title?,
-    email?, place_id?, city?, state?}. Domain is required.
+    email?, linkedin_url?, phone?, place_id?, city?, state?}. Domain is required.
 
     client_tag is required: 'basco' | 'peterson'. Never omit it.
     need = 'dm' | 'email' | 'both'.

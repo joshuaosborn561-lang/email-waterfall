@@ -20,8 +20,10 @@ Peterson titles: Owner, Founder, Principal, President, Partner, CEO, VP, Directo
 ## Waterfall
 
 ```
-getleads → AI Ark (people only) → LeadMagic → FullEnrich (email only, opt-in)
+getleads → AI Ark → LeadMagic → FullEnrich (email only, opt-in)
 ```
+
+AI Ark is **second on both lanes**. For emails it accepts a LinkedIn URL, an AI Ark person id, name + domain, and/or phone (`POST /v2/people/export/single` after People Search when needed). It is not people-discovery-only.
 
 `max_tier` default is `leadmagic`. FullEnrich never runs unless you pass `max_tier=fullenrich`.
 

@@ -1,7 +1,11 @@
 """DM / work-email enrichment waterfall.
 
 Tiers (fixed, no Maps, no website crawl, no Apify):
-  getleads → AI Ark (people) → LeadMagic → FullEnrich (email only, opt-in)
+  getleads → AI Ark → LeadMagic → FullEnrich (email only, opt-in)
+
+AI Ark is second on BOTH lanes:
+  people/DM: People Search by domain
+  email: LinkedIn URL / person id / name+domain / phone → export/single
 
 Writes to public.{client}_companies / public.{client}_contacts.
 """
@@ -101,7 +105,13 @@ def _norm_row(r: dict[str, Any]) -> dict[str, Any]:
         "place_id": str(r.get("place_id") or "").strip(),
         "city": str(r.get("city") or r.get("address_city") or "").strip(),
         "state": str(r.get("state") or r.get("address_state") or "").strip(),
-        "linkedin_url": str(r.get("linkedin_url") or "").strip(),
+        "linkedin_url": str(
+            r.get("linkedin_url") or r.get("linkedin") or r.get("profile_url") or ""
+        ).strip(),
+        "phone": str(
+            r.get("phone") or r.get("cellphone") or r.get("mobile") or ""
+        ).strip(),
+        "ai_ark_id": str(r.get("ai_ark_id") or r.get("person_id") or "").strip(),
         "source": str(r.get("source") or "waterfall").strip() or "waterfall",
     }
 
@@ -138,7 +148,7 @@ class Waterfall:
             "fullenrich": _empty_stats(),
         }
         self._vendor_dm_cache: dict[str, PersonHit | None] = {}
-        self._email_cache: dict[tuple[str, str, str], EmailHit | None] = {}
+        self._email_cache: dict[tuple[str, ...], EmailHit | None] = {}
 
     def _bump(self, tier: str, field: str) -> None:
         self.tier_stats.setdefault(tier, _empty_stats())
@@ -156,38 +166,79 @@ class Waterfall:
         )
         return ranked.person if ranked else None
 
-    def resolve_email(self, row: dict[str, Any]) -> EmailHit | None:
+    def _email_cache_key(self, row: dict[str, Any]) -> tuple[str, ...]:
+        return (
+            (row.get("first_name") or "").lower(),
+            (row.get("last_name") or "").lower(),
+            row.get("domain") or "",
+            (row.get("linkedin_url") or "").lower(),
+            (row.get("phone") or "").strip(),
+            str(row.get("ai_ark_id") or ""),
+        )
+
+    def resolve_email(
+        self, row: dict[str, Any], *, include_fullenrich: bool = True
+    ) -> EmailHit | None:
         first, last, domain = row["first_name"], row["last_name"], row["domain"]
         if row.get("email"):
             return EmailHit(email=row["email"], source_tier="input", status="provided")
-        if not (first and last and domain):
+        linkedin = row.get("linkedin_url") or ""
+        phone = row.get("phone") or ""
+        person_id = str(row.get("ai_ark_id") or "")
+        has_name_domain = bool(first and last and domain)
+        can_aiark = bool(
+            linkedin or person_id or has_name_domain or (phone and (first or last or domain))
+        )
+        if not has_name_domain and not can_aiark:
             return None
-        cache_key = (first.lower(), last.lower(), domain)
+        cache_key = self._email_cache_key(row)
         if cache_key in self._email_cache:
             return self._email_cache[cache_key]
 
         hit: EmailHit | None = None
-        if self.getleads.enabled and self._allowed("getleads"):
+        company = row.get("company_name") or ""
+
+        if has_name_domain and self.getleads.enabled and self._allowed("getleads"):
             self._bump("getleads", "calls")
-            hit = self.getleads.find_email(
-                first, last, domain, row.get("company_name") or ""
-            )
+            hit = self.getleads.find_email(first, last, domain, company)
             if hit:
                 self._bump("getleads", "email_hits")
 
-        if not hit and self.leadmagic.enabled and self._allowed("leadmagic"):
-            self._bump("leadmagic", "calls")
-            hit = self.leadmagic.find_email(
-                first, last, domain, row.get("company_name") or ""
+        if not hit and can_aiark and self.ai_ark.enabled and self._allowed("aiark"):
+            self._bump("aiark", "calls")
+            hit = self.ai_ark.find_email(
+                first,
+                last,
+                domain,
+                company,
+                linkedin_url=linkedin,
+                phone=phone,
+                person_id=person_id,
+                full_name=row.get("full_name") or "",
             )
+            if hit:
+                self._bump("aiark", "email_hits")
+
+        if (
+            not hit
+            and has_name_domain
+            and self.leadmagic.enabled
+            and self._allowed("leadmagic")
+        ):
+            self._bump("leadmagic", "calls")
+            hit = self.leadmagic.find_email(first, last, domain, company)
             if hit:
                 self._bump("leadmagic", "email_hits")
 
-        if not hit and self.fullenrich.enabled and self._allowed("fullenrich"):
+        if (
+            not hit
+            and include_fullenrich
+            and has_name_domain
+            and self.fullenrich.enabled
+            and self._allowed("fullenrich")
+        ):
             self._bump("fullenrich", "calls")
-            hit = self.fullenrich.find_email(
-                first, last, domain, row.get("company_name") or ""
-            )
+            hit = self.fullenrich.find_email(first, last, domain, company)
             if hit:
                 self._bump("fullenrich", "email_hits")
 
@@ -354,38 +405,30 @@ def enrich_waterfall(
                     row["full_name"] = person.name
                 if not row.get("title") and person.title:
                     row["title"] = person.title
+                if person.linkedin_url and not row.get("linkedin_url"):
+                    row["linkedin_url"] = person.linkedin_url
+                if person.phone and not row.get("phone"):
+                    row["phone"] = person.phone
+                if person.source_tier == "aiark":
+                    pid = str((person.raw or {}).get("id") or "").strip()
+                    if pid and not row.get("ai_ark_id"):
+                        row["ai_ark_id"] = pid
                 if person.email and not email:
                     email = person.email
                     email_tier = person.source_tier
 
         if need_norm in ("email", "both") and not email:
-            first, last, domain = row["first_name"], row["last_name"], row["domain"]
-            if first and last and domain:
-                # Inline getleads + leadmagic; defer FullEnrich to bulk.
-                if wf.getleads.enabled and wf._allowed("getleads"):
-                    wf._bump("getleads", "calls")
-                    hit = wf.getleads.find_email(
-                        first, last, domain, row.get("company_name") or ""
-                    )
-                    if hit:
-                        wf._bump("getleads", "email_hits")
-                        email, email_tier = hit.email, hit.source_tier
-                        wf._email_cache[(first.lower(), last.lower(), domain)] = hit
-                if not email and wf.leadmagic.enabled and wf._allowed("leadmagic"):
-                    wf._bump("leadmagic", "calls")
-                    hit = wf.leadmagic.find_email(
-                        first, last, domain, row.get("company_name") or ""
-                    )
-                    if hit:
-                        wf._bump("leadmagic", "email_hits")
-                        email, email_tier = hit.email, hit.source_tier
-                        wf._email_cache[(first.lower(), last.lower(), domain)] = hit
-                if (
-                    not email
-                    and wf.fullenrich.enabled
-                    and wf._allowed("fullenrich")
-                ):
-                    pending_fe.append((idx, row))
+            hit = wf.resolve_email(row, include_fullenrich=False)
+            if hit:
+                email, email_tier = hit.email, hit.source_tier
+            elif (
+                row["first_name"]
+                and row["last_name"]
+                and row["domain"]
+                and wf.fullenrich.enabled
+                and wf._allowed("fullenrich")
+            ):
+                pending_fe.append((idx, row))
 
         enriched.append(
             {
@@ -472,6 +515,9 @@ def enrich_waterfall(
                     email_status="found" if email else "",
                     linkedin_url=(person.linkedin_url if person else "")
                     or row.get("linkedin_url")
+                    or "",
+                    cellphone=(person.phone if person else "")
+                    or row.get("phone")
                     or "",
                     contact_city=row.get("city") or "",
                     contact_state=row.get("state") or "",
