@@ -1,7 +1,7 @@
 """DM / work-email enrichment waterfall.
 
 Tiers (fixed, no Maps, no website crawl, no Apify):
-  getleads → AI Ark → LeadMagic → Prospeo → FullEnrich (email only, opt-in)
+  getleads → AI Ark → LeadMagic → Prospeo → FullEnrich
 
 AI Ark is second on BOTH lanes:
   people/DM: People Search by domain
@@ -31,7 +31,7 @@ MaxTier = Literal["getleads", "aiark", "leadmagic", "prospeo", "fullenrich"]
 
 TIER_ORDER: list[str] = ["getleads", "aiark", "leadmagic", "prospeo", "fullenrich"]
 TIER_RANK = {name: i for i, name in enumerate(TIER_ORDER)}
-DEFAULT_MAX_TIER: MaxTier = "prospeo"
+DEFAULT_MAX_TIER: MaxTier = "fullenrich"
 
 
 def normalize_max_tier(max_tier: str | None) -> str:
@@ -41,6 +41,7 @@ def normalize_max_tier(max_tier: str | None) -> str:
         "ai-ark": "aiark",
         "full_enrich": "fullenrich",
         "full-enrich": "fullenrich",
+        "fe": "fullenrich",
         "get_leads": "getleads",
         "lead_magic": "leadmagic",
         "prospector": "prospeo",

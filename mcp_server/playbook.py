@@ -26,14 +26,14 @@ Never omit `client_tag`. Never write to a shared contacts table.
 ## Default flow
 1. Call `health` if vendor keys or Supabase might be missing.
 2. Call `enrich_waterfall` with `rows` (JSON list of domain objects), `client_tag`,
-   `need` (`dm` | `email` | `both`), `max_tier` (default `prospeo`).
+   `need` (`dm` | `email` | `both`), `max_tier` (default `fullenrich`).
 3. If the tool returns `job_id`, poll `get_job_status` until completed/failed.
 4. Report counts only: rows_in, dms_found, emails_found, companies_upserted,
    contacts_written, tier_breakdown. Do not dump contact payloads.
 
 ## Tiers
-getleads → AI Ark → LeadMagic → Prospeo → FullEnrich (email only, only if
-`max_tier=fullenrich`). Default max_tier is prospeo.
+getleads → AI Ark → LeadMagic → Prospeo → FullEnrich.
+Default max_tier is fullenrich (alias `fe`). Cap earlier with max_tier if needed.
 
 AI Ark is second on the email lane too: LinkedIn URL, AI Ark person id,
 name+domain, or phone → verified work email. It is not skipped just because

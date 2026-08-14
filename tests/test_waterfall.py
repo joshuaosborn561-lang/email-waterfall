@@ -127,7 +127,6 @@ def test_fullenrich_runs_when_max_tier_allows(monkeypatch) -> None:
         ],
         client_tag="peterson",
         need="email",
-        max_tier="fullenrich",
         write_supabase=True,
     )
     fe.find_email_bulk.assert_called_once()
@@ -327,8 +326,9 @@ def test_apify_is_not_a_real_tier() -> None:
     assert waterfall.TIER_ORDER[2] == "leadmagic"
     assert waterfall.TIER_ORDER[3] == "prospeo"
     assert waterfall.TIER_ORDER[4] == "fullenrich"
-    assert waterfall.DEFAULT_MAX_TIER == "prospeo"
+    assert waterfall.DEFAULT_MAX_TIER == "fullenrich"
     assert waterfall.normalize_max_tier("prospector") == "prospeo"
+    assert waterfall.normalize_max_tier("fe") == "fullenrich"
 
 
 def test_aiark_is_second_email_tier(monkeypatch) -> None:
@@ -465,7 +465,7 @@ def test_prospeo_runs_after_leadmagic(monkeypatch) -> None:
     fe.find_email_bulk.assert_not_called()
     assert sink["companies"][0]["email_source_tier"] == "prospeo"
     assert out["vendors_enabled"]["prospeo"] is True
-    assert out["vendors_enabled"]["fullenrich"] is False
+    assert out["vendors_enabled"]["fullenrich"] is True
 
 
 def test_max_tier_leadmagic_blocks_prospeo(monkeypatch) -> None:

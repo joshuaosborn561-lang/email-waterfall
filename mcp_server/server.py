@@ -105,7 +105,7 @@ def health() -> str:
                 }
                 for tag, c in CLIENTS.items()
             },
-            "max_tier_default": "prospeo",
+            "max_tier_default": "fullenrich",
             "auth": "none",
         }
     )
@@ -176,7 +176,7 @@ def enrich_waterfall(
     rows: Any,
     client_tag: str,
     need: str = "both",
-    max_tier: str = "prospeo",
+    max_tier: str = "fullenrich",
     target_titles: str = "",
     require_title_match: bool = True,
     background: bool = True,
@@ -189,7 +189,7 @@ def enrich_waterfall(
     client_tag is required: 'basco' | 'peterson'. Never omit it.
     need = 'dm' | 'email' | 'both'.
     max_tier = 'getleads' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
-    (default 'prospeo' — FullEnrich never runs unless explicitly requested).
+    (default 'fullenrich' — the waterfall runs every paid email tier).
 
     target_titles = comma-separated ranked titles. Empty uses the client default.
     require_title_match = drop people whose title is not in the ranked list
