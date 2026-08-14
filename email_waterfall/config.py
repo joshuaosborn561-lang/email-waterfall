@@ -30,6 +30,7 @@ class Settings:
     getleads_people_path: str
     ai_ark_api_key: str
     leadmagic_api_key: str
+    prospeo_api_key: str
     fullenrich_api_key: str
 
     @property
@@ -52,6 +53,7 @@ def load_settings() -> Settings:
         getleads_people_path=_env("GETLEADS_PEOPLE_PATH", "/people"),
         ai_ark_api_key=_env("AI_ARK_API_KEY") or _env("AIARK_API_KEY"),
         leadmagic_api_key=_env("LEADMAGIC_API_KEY") or _env("LEADMAGIC_KEY"),
+        prospeo_api_key=_env("PROSPEO_API_KEY"),
         fullenrich_api_key=_env("FULLENRICH_API_KEY"),
     )
 

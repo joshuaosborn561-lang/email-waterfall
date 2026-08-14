@@ -1,7 +1,7 @@
 """DM / work-email enrichment waterfall.
 
 Tiers (fixed, no Maps, no website crawl, no Apify):
-  getleads → AI Ark → LeadMagic → FullEnrich (email only, opt-in)
+  getleads → AI Ark → LeadMagic → Prospeo → FullEnrich (email only, opt-in)
 
 AI Ark is second on BOTH lanes:
   people/DM: People Search by domain
@@ -24,13 +24,14 @@ from .vendors.base import EmailHit, PersonHit, split_name
 from .vendors.fullenrich import FullEnrichClient
 from .vendors.getleads import GetLeadsClient
 from .vendors.leadmagic import LeadMagicClient
+from .vendors.prospeo import ProspeoClient
 
 Need = Literal["email", "dm", "both"]
-MaxTier = Literal["getleads", "aiark", "leadmagic", "fullenrich"]
+MaxTier = Literal["getleads", "aiark", "leadmagic", "prospeo", "fullenrich"]
 
-TIER_ORDER: list[str] = ["getleads", "aiark", "leadmagic", "fullenrich"]
+TIER_ORDER: list[str] = ["getleads", "aiark", "leadmagic", "prospeo", "fullenrich"]
 TIER_RANK = {name: i for i, name in enumerate(TIER_ORDER)}
-DEFAULT_MAX_TIER: MaxTier = "leadmagic"
+DEFAULT_MAX_TIER: MaxTier = "prospeo"
 
 
 def normalize_max_tier(max_tier: str | None) -> str:
@@ -42,6 +43,7 @@ def normalize_max_tier(max_tier: str | None) -> str:
         "full-enrich": "fullenrich",
         "get_leads": "getleads",
         "lead_magic": "leadmagic",
+        "prospector": "prospeo",
         "apify": "getleads",  # Apify is not in this service; start at first paid tier
     }
     t = aliases.get(t, t)
@@ -127,6 +129,7 @@ class Waterfall:
         getleads: GetLeadsClient | None = None,
         ai_ark: AiArkClient | None = None,
         leadmagic: LeadMagicClient | None = None,
+        prospeo: ProspeoClient | None = None,
         fullenrich: FullEnrichClient | None = None,
         max_tier: str = DEFAULT_MAX_TIER,
         target_titles: list[str] | None = None,
@@ -136,6 +139,7 @@ class Waterfall:
         self.getleads = getleads or GetLeadsClient()
         self.ai_ark = ai_ark or AiArkClient()
         self.leadmagic = leadmagic or LeadMagicClient()
+        self.prospeo = prospeo or ProspeoClient()
         self.fullenrich = fullenrich or FullEnrichClient()
         self.max_tier = normalize_max_tier(max_tier)
         self.target_titles = list(target_titles or [])
@@ -145,6 +149,7 @@ class Waterfall:
             "aiark": _empty_stats(),
             "getleads": _empty_stats(),
             "leadmagic": _empty_stats(),
+            "prospeo": _empty_stats(),
             "fullenrich": _empty_stats(),
         }
         self._vendor_dm_cache: dict[str, PersonHit | None] = {}
@@ -229,6 +234,20 @@ class Waterfall:
             hit = self.leadmagic.find_email(first, last, domain, company)
             if hit:
                 self._bump("leadmagic", "email_hits")
+
+        can_prospeo = bool(linkedin or has_name_domain)
+        if not hit and can_prospeo and self.prospeo.enabled and self._allowed("prospeo"):
+            self._bump("prospeo", "calls")
+            hit = self.prospeo.find_email(
+                first,
+                last,
+                domain,
+                company,
+                linkedin_url=linkedin,
+                full_name=row.get("full_name") or "",
+            )
+            if hit:
+                self._bump("prospeo", "email_hits")
 
         if (
             not hit
@@ -543,6 +562,7 @@ def enrich_waterfall(
         ("getleads", wf.getleads),
         ("aiark", wf.ai_ark),
         ("leadmagic", wf.leadmagic),
+        ("prospeo", wf.prospeo),
         ("fullenrich", wf.fullenrich),
     ):
         wf.tier_stats[name]["vendor_calls"] = getattr(vendor, "calls", 0)
@@ -580,6 +600,7 @@ def enrich_waterfall(
             "getleads": wf.getleads.enabled and wf._allowed("getleads"),
             "aiark": wf.ai_ark.enabled and wf._allowed("aiark"),
             "leadmagic": wf.leadmagic.enabled and wf._allowed("leadmagic"),
+            "prospeo": wf.prospeo.enabled and wf._allowed("prospeo"),
             "fullenrich": wf.fullenrich.enabled and wf._allowed("fullenrich"),
         },
     }

@@ -21,10 +21,11 @@ def _vendor(*, enabled: bool = True, people=None, email=None):
     return m
 
 
-def _patch_clients(monkeypatch, *, gl, ark, lm, fe) -> None:
+def _patch_clients(monkeypatch, *, gl, ark, lm, fe, prospeo=None) -> None:
     monkeypatch.setattr(waterfall, "GetLeadsClient", lambda: gl)
     monkeypatch.setattr(waterfall, "AiArkClient", lambda: ark)
     monkeypatch.setattr(waterfall, "LeadMagicClient", lambda: lm)
+    monkeypatch.setattr(waterfall, "ProspeoClient", lambda: prospeo or _vendor(enabled=False))
     monkeypatch.setattr(waterfall, "FullEnrichClient", lambda: fe)
 
 
@@ -324,6 +325,10 @@ def test_apify_is_not_a_real_tier() -> None:
     assert waterfall.TIER_ORDER[0] == "getleads"
     assert waterfall.TIER_ORDER[1] == "aiark"
     assert waterfall.TIER_ORDER[2] == "leadmagic"
+    assert waterfall.TIER_ORDER[3] == "prospeo"
+    assert waterfall.TIER_ORDER[4] == "fullenrich"
+    assert waterfall.DEFAULT_MAX_TIER == "prospeo"
+    assert waterfall.normalize_max_tier("prospector") == "prospeo"
 
 
 def test_aiark_is_second_email_tier(monkeypatch) -> None:
@@ -424,6 +429,76 @@ def test_aiark_email_uses_dm_linkedin(monkeypatch) -> None:
         ark.find_email.call_args.kwargs.get("linkedin_url")
         == "https://www.linkedin.com/in/pat-director"
     )
+
+
+def test_prospeo_runs_after_leadmagic(monkeypatch) -> None:
+    sink: dict = {}
+    gl = _vendor(email=None)
+    ark = _vendor(email=None)
+    lm = _vendor(email=None)
+    prospeo = _vendor(
+        email=EmailHit(email="jane@roofco.com", source_tier="prospeo", status="VERIFIED")
+    )
+    fe = _vendor(enabled=True)
+    fe.find_email_bulk.return_value = [
+        EmailHit(email="should-not@x.com", source_tier="fullenrich")
+    ]
+    _patch_clients(monkeypatch, gl=gl, ark=ark, lm=lm, fe=fe, prospeo=prospeo)
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+                "company_name": "Roof Co",
+            }
+        ],
+        client_tag="peterson",
+        need="email",
+        write_supabase=True,
+    )
+    assert out["emails_found"] == 1
+    lm.find_email.assert_called()
+    prospeo.find_email.assert_called()
+    fe.find_email_bulk.assert_not_called()
+    assert sink["companies"][0]["email_source_tier"] == "prospeo"
+    assert out["vendors_enabled"]["prospeo"] is True
+    assert out["vendors_enabled"]["fullenrich"] is False
+
+
+def test_max_tier_leadmagic_blocks_prospeo(monkeypatch) -> None:
+    sink: dict = {}
+    prospeo = _vendor(
+        email=EmailHit(email="jane@roofco.com", source_tier="prospeo")
+    )
+    _patch_clients(
+        monkeypatch,
+        gl=_vendor(email=None),
+        ark=_vendor(email=None),
+        lm=_vendor(email=None),
+        fe=_vendor(enabled=False),
+        prospeo=prospeo,
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+            }
+        ],
+        client_tag="peterson",
+        need="email",
+        max_tier="leadmagic",
+        write_supabase=True,
+    )
+    prospeo.find_email.assert_not_called()
+    assert out["vendors_enabled"]["prospeo"] is False
+    assert out["max_tier"] == "leadmagic"
 
 
 def test_empty_rows() -> None:

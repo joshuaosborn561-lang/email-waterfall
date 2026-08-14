@@ -93,6 +93,7 @@ def health() -> str:
                 "getleads": bool(settings.getleads_api_key),
                 "aiark": bool(settings.ai_ark_api_key),
                 "leadmagic": bool(settings.leadmagic_api_key),
+                "prospeo": bool(settings.prospeo_api_key),
                 "fullenrich": bool(settings.fullenrich_api_key),
             },
             "clients": {
@@ -104,7 +105,7 @@ def health() -> str:
                 }
                 for tag, c in CLIENTS.items()
             },
-            "max_tier_default": "leadmagic",
+            "max_tier_default": "prospeo",
             "auth": "none",
         }
     )
@@ -175,7 +176,7 @@ def enrich_waterfall(
     rows: Any,
     client_tag: str,
     need: str = "both",
-    max_tier: str = "leadmagic",
+    max_tier: str = "prospeo",
     target_titles: str = "",
     require_title_match: bool = True,
     background: bool = True,
@@ -187,8 +188,8 @@ def enrich_waterfall(
 
     client_tag is required: 'basco' | 'peterson'. Never omit it.
     need = 'dm' | 'email' | 'both'.
-    max_tier = 'getleads' | 'aiark' | 'leadmagic' | 'fullenrich'
-    (default 'leadmagic' — FullEnrich never runs unless explicitly requested).
+    max_tier = 'getleads' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
+    (default 'prospeo' — FullEnrich never runs unless explicitly requested).
 
     target_titles = comma-separated ranked titles. Empty uses the client default.
     require_title_match = drop people whose title is not in the ranked list

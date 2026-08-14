@@ -20,12 +20,12 @@ Peterson titles: Owner, Founder, Principal, President, Partner, CEO, VP, Directo
 ## Waterfall
 
 ```
-getleads → AI Ark → LeadMagic → FullEnrich (email only, opt-in)
+getleads → AI Ark → LeadMagic → Prospeo → FullEnrich (email only, opt-in)
 ```
 
 AI Ark is **second on both lanes**. For emails it accepts a LinkedIn URL, an AI Ark person id, name + domain, and/or phone (`POST /v2/people/export/single` after People Search when needed). It is not people-discovery-only.
 
-`max_tier` default is `leadmagic`. FullEnrich never runs unless you pass `max_tier=fullenrich`.
+Prospeo is fourth on the email lane (`POST /enrich-person`, verified email only). `max_tier` default is `prospeo`. FullEnrich never runs unless you pass `max_tier=fullenrich`.
 
 ## MCP tool: `enrich_waterfall`
 
@@ -46,7 +46,7 @@ AI Ark is **second on both lanes**. For emails it accepts a LinkedIn URL, an AI 
   ],
   "need": "dm",
   "client_tag": "basco",
-  "max_tier": "leadmagic",
+  "max_tier": "prospeo",
   "target_titles": "Service Director, Fixed Operations Director, Service Manager, Warranty Manager, General Manager, Dealer Principal, GM",
   "require_title_match": true,
   "background": true
