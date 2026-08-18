@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import requests
-
+from email_waterfall import http_client
 from email_waterfall.config import settings
 
 from .base import EmailHit, PersonHit, person_from_row
@@ -47,15 +46,21 @@ class GetLeadsClient:
             return None
         url = f"{self.base_url}{path if path.startswith('/') else '/' + path}"
         self.calls += 1
+        r = http_client.post(
+            self.tier,
+            url,
+            json=body,
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        if r is None:
+            return None
         try:
-            r = requests.post(
-                url, json=body, headers=self._headers(), timeout=self.timeout
-            )
             if r.status_code >= 400:
                 return None
             data = r.json()
             return data if isinstance(data, dict) else {"data": data}
-        except (requests.RequestException, ValueError):
+        except ValueError:
             return None
 
     def find_email(

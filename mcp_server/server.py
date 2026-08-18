@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
@@ -208,7 +208,9 @@ def enrich_waterfall(
     client = get_client(client_tag)
     max_tier_n = wf.normalize_max_tier(max_tier)
 
-    def _run() -> dict[str, Any]:
+    def _run_enrich(
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         return wf.enrich_waterfall(
             rows,
             client_tag=client.tag,
@@ -217,7 +219,16 @@ def enrich_waterfall(
             target_titles=target_titles,
             require_title_match=bool(require_title_match),
             write_supabase=True,
+            progress_callback=progress_callback,
         )
+
+    def _run(job: Any) -> dict[str, Any]:
+        from mcp_server.jobs import update_job_progress
+
+        def on_progress(snapshot: dict[str, Any]) -> None:
+            update_job_progress(job.id, snapshot)
+
+        return _run_enrich(progress_callback=on_progress)
 
     rows_chars = len(rows) if isinstance(rows, str) else len(json.dumps(rows, default=str))
     if background and (_http_mode() or rows_chars > 2000):
@@ -243,7 +254,7 @@ def enrich_waterfall(
                 "contacts_table": client.contacts_table,
             }
         )
-    return _json(_run())
+    return _json(_run_enrich())
 
 
 def _mount_http_routes() -> None:

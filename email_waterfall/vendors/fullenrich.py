@@ -5,8 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import requests
-
+from email_waterfall import http_client
 from email_waterfall.config import settings
 
 from .base import EmailHit
@@ -90,17 +89,20 @@ class FullEnrichClient:
             return [None] * len(rows)
 
         self.calls += 1
+        r = http_client.post(
+            self.tier,
+            f"{self.base_url}/contact/enrich/bulk",
+            json={"name": name, "data": data},
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        if r is None:
+            return [None] * len(rows)
         try:
-            r = requests.post(
-                f"{self.base_url}/contact/enrich/bulk",
-                json={"name": name, "data": data},
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
             if r.status_code >= 400:
                 return [None] * len(rows)
             accepted = r.json()
-        except (requests.RequestException, ValueError):
+        except ValueError:
             return [None] * len(rows)
 
         enrichment_id = (
@@ -143,13 +145,21 @@ class FullEnrichClient:
         deadline = time.time() + max_wait
         url = f"{self.base_url}/contact/enrich/bulk/{enrichment_id}"
         while time.time() < deadline:
+            r = http_client.get(
+                self.tier,
+                url,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            if r is None:
+                time.sleep(poll_seconds)
+                continue
             try:
-                r = requests.get(url, headers=self._headers(), timeout=self.timeout)
                 if r.status_code >= 400:
                     time.sleep(poll_seconds)
                     continue
                 payload = r.json()
-            except (requests.RequestException, ValueError):
+            except ValueError:
                 time.sleep(poll_seconds)
                 continue
             status = str(

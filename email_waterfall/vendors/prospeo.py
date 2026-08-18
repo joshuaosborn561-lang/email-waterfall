@@ -9,8 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import requests
-
+from email_waterfall import http_client
 from email_waterfall.config import settings
 
 from .base import EmailHit
@@ -77,23 +76,22 @@ class ProspeoClient:
             return None
 
         self.calls += 1
+        r = http_client.post(
+            self.tier,
+            f"{self.base_url}/enrich-person",
+            json={
+                "only_verified_email": True,
+                "enrich_mobile": False,
+                "data": data,
+            },
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        if r is None:
+            return None
         try:
-            r = requests.post(
-                f"{self.base_url}/enrich-person",
-                json={
-                    "only_verified_email": True,
-                    "enrich_mobile": False,
-                    "data": data,
-                },
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            body: Any
-            try:
-                body = r.json()
-            except ValueError:
-                return None
-        except requests.RequestException:
+            body: Any = r.json()
+        except ValueError:
             return None
 
         if not isinstance(body, dict):

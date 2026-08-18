@@ -5,10 +5,15 @@ from __future__ import annotations
 from email_waterfall.vendors.prospeo import ProspeoClient
 
 
+def _patch_post(monkeypatch, fake_post):
+    monkeypatch.setattr("email_waterfall.http_client.post", fake_post)
+
+
 def test_find_email_name_domain(monkeypatch) -> None:
     client = ProspeoClient(api_key="pk_test")
 
-    def fake_post(url, json, headers, timeout):
+    def fake_post(tier, url, json=None, headers=None, timeout=45):
+        assert tier == "prospeo"
         assert url.endswith("/enrich-person")
         assert headers["X-KEY"] == "pk_test"
         assert json["only_verified_email"] is True
@@ -32,7 +37,7 @@ def test_find_email_name_domain(monkeypatch) -> None:
 
         return Resp()
 
-    monkeypatch.setattr("email_waterfall.vendors.prospeo.requests.post", fake_post)
+    _patch_post(monkeypatch, fake_post)
     hit = client.find_email("Jane", "Smith", "roofco.com", "Roof Co")
     assert hit is not None
     assert hit.email == "jane@roofco.com"
@@ -42,7 +47,7 @@ def test_find_email_name_domain(monkeypatch) -> None:
 def test_find_email_rejects_masked(monkeypatch) -> None:
     client = ProspeoClient(api_key="pk_test")
 
-    def fake_post(url, json, headers, timeout):
+    def fake_post(tier, url, json=None, headers=None, timeout=45):
         class Resp:
             status_code = 200
 
@@ -56,14 +61,14 @@ def test_find_email_rejects_masked(monkeypatch) -> None:
 
         return Resp()
 
-    monkeypatch.setattr("email_waterfall.vendors.prospeo.requests.post", fake_post)
+    _patch_post(monkeypatch, fake_post)
     assert client.find_email("Jane", "Smith", "roofco.com") is None
 
 
 def test_find_email_no_match(monkeypatch) -> None:
     client = ProspeoClient(api_key="pk_test")
 
-    def fake_post(url, json, headers, timeout):
+    def fake_post(tier, url, json=None, headers=None, timeout=45):
         class Resp:
             status_code = 400
 
@@ -72,14 +77,14 @@ def test_find_email_no_match(monkeypatch) -> None:
 
         return Resp()
 
-    monkeypatch.setattr("email_waterfall.vendors.prospeo.requests.post", fake_post)
+    _patch_post(monkeypatch, fake_post)
     assert client.find_email("Jane", "Smith", "roofco.com") is None
 
 
 def test_find_email_linkedin_only(monkeypatch) -> None:
     client = ProspeoClient(api_key="pk_test")
 
-    def fake_post(url, json, headers, timeout):
+    def fake_post(tier, url, json=None, headers=None, timeout=45):
         assert json["data"]["linkedin_url"].startswith("https://www.linkedin.com")
 
         class Resp:
@@ -93,7 +98,7 @@ def test_find_email_linkedin_only(monkeypatch) -> None:
 
         return Resp()
 
-    monkeypatch.setattr("email_waterfall.vendors.prospeo.requests.post", fake_post)
+    _patch_post(monkeypatch, fake_post)
     hit = client.find_email(linkedin_url="https://www.linkedin.com/in/pat-lee")
     assert hit is not None
     assert hit.email == "pat@x.com"

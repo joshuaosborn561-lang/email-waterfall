@@ -110,9 +110,9 @@ def test_fullenrich_runs_when_max_tier_allows(monkeypatch) -> None:
     gl = _vendor(email=None)
     lm = _vendor(email=None)
     fe = _vendor(enabled=True)
-    fe.find_email_bulk.return_value = [
-        EmailHit(email="jane@roofco.com", source_tier="fullenrich", status="found")
-    ]
+    fe_hit = EmailHit(email="jane@roofco.com", source_tier="fullenrich", status="found")
+    fe.find_email.return_value = fe_hit
+    fe.find_email_bulk.return_value = [fe_hit]
     _patch_clients(monkeypatch, gl=gl, ark=_vendor(enabled=False), lm=lm, fe=fe)
     _patch_writes(monkeypatch, sink)
 
@@ -129,7 +129,7 @@ def test_fullenrich_runs_when_max_tier_allows(monkeypatch) -> None:
         need="email",
         write_supabase=True,
     )
-    fe.find_email_bulk.assert_called_once()
+    fe.find_email.assert_called_once()
     assert out["emails_found"] == 1
     assert sink["companies"][0]["email_source_tier"] == "fullenrich"
 

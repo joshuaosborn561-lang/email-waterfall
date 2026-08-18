@@ -12,8 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import requests
-
+from email_waterfall import http_client
 from email_waterfall.config import settings
 
 from .base import EmailHit, PersonHit, split_name
@@ -82,20 +81,20 @@ class AiArkClient:
         if not self.enabled:
             return 0, None
         self.calls += 1
-        try:
-            r = requests.post(
-                f"{self.base_url}{path}",
-                json=body,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            try:
-                data = r.json()
-            except ValueError:
-                data = None
-            return r.status_code, data
-        except requests.RequestException:
+        r = http_client.post(
+            self.tier,
+            f"{self.base_url}{path}",
+            json=body,
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        if r is None:
             return 0, None
+        try:
+            data = r.json()
+        except ValueError:
+            data = None
+        return r.status_code, data
 
     def _person_from_row(self, row: dict[str, Any]) -> PersonHit | None:
         profile = row.get("profile") if isinstance(row.get("profile"), dict) else row

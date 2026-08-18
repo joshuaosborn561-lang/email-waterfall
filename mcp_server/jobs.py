@@ -72,8 +72,23 @@ def list_jobs(limit: int = 20) -> list[Job]:
     return out
 
 
+def update_job_progress(job_id: str, snapshot: dict[str, Any]) -> None:
+    """Persist mid-run progress into job.result for get_job_status polling."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            try:
+                job = get_job(job_id)
+            except ValueError:
+                return
+        job.result = dict(snapshot)
+    _persist(job)
+
+
 def start_job(
-    kind: str, fn: Callable[[], dict[str, Any]], meta: dict[str, Any] | None = None
+    kind: str,
+    fn: Callable[[Job], dict[str, Any]],
+    meta: dict[str, Any] | None = None,
 ) -> Job:
     job = Job(
         id=uuid.uuid4().hex[:12],
@@ -91,7 +106,7 @@ def start_job(
         job.started_at = time.time()
         _persist(job)
         try:
-            job.result = fn() or {}
+            job.result = fn(job) or {}
             job.status = "completed"
         except Exception as exc:  # noqa: BLE001
             job.status = "failed"
