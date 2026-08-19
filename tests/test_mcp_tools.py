@@ -17,6 +17,8 @@ def test_tool_names() -> None:
     assert "health" in names
     assert "get_job_status" in names
     assert "describe_client" in names
+    assert "ensure_client" in names
+    assert "list_clients" in names
     banned = {
         "scrape_maps",
         "run_leads",

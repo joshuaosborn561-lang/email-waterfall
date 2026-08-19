@@ -68,6 +68,24 @@ def _request(
         ) from exc
 
 
+def rpc(name: str, body: dict[str, Any] | None = None) -> Any:
+    """Call a PostgREST RPC. Returns parsed JSON or None if unconfigured."""
+    if not load_settings().supabase_configured:
+        return None
+    _status, text = _request(
+        "POST",
+        f"rpc/{name}",
+        body=body or {},
+        prefer="return=representation",
+    )
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
 def _chunks(rows: list[dict[str, Any]], size: int = BATCH_SIZE):
     for i in range(0, len(rows), size):
         yield rows[i : i + size]

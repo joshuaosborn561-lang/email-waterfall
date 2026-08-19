@@ -1,0 +1,4 @@
+-- Client registry + ensure function already live in campaignintelligence.
+-- Documented here so the repo matches production.
+-- public.ew_clients, public.ew_ensure_client(), public.ew_list_clients()
+-- create {tag}_wf_companies / {tag}_wf_contacts for any new snake_case tag.
