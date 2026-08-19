@@ -13,23 +13,22 @@ Apify contact scrapers, or crawl team pages from this server. Those live in
 that already exist.
 
 ## Clients (required `client_tag`)
-- **basco** (Carlos) — franchise new-car dealership rooftops near Clifton, NJ.
-  Ranked titles: Service Director → Fixed Ops Director → Service Manager →
-  Warranty Manager → Director/VP of Service → GM / Dealer Principal (fallback).
-  Writes `public.basco_companies` / `public.basco_contacts`.
-- **peterson** (Kyle) — commercial roofing / GCs / PMs in Dallas-Fort Worth.
-  Titles: Owner, Founder, Principal, President, Partner, CEO, VP, Director, GM.
-  Writes `public.peterson_companies` / `public.peterson_contacts`.
+Any snake_case `client_tag` works. Call `ensure_client` (or just `enrich_waterfall`,
+which auto-ensures) to create write tables — no deploy needed for a new client.
+
+- **basco** (Carlos) — service/fixed-ops titles; `basco_companies` / `basco_contacts`.
+- **peterson** (Kyle) — owner titles; `peterson_companies` / `peterson_contacts`.
+- **Any new tag** (e.g. goliath) — default owner ranked titles; writes
+  `public.{tag}_wf_companies` / `public.{tag}_wf_contacts`.
+  Pass `profile=service` for basco-style titles, or `target_titles` to override.
 
 Never omit `client_tag`. Never write to a shared contacts table.
 
 ## Default flow
-1. Call `health` if vendor keys or Supabase might be missing.
-2. Call `enrich_waterfall` with `rows` (JSON list of domain objects), `client_tag`,
-   `need` (`dm` | `email` | `both`), `max_tier` (default `fullenrich`).
+1. Optional: `ensure_client({ client_tag, profile, target_titles })` for a new client.
+2. Call `enrich_waterfall` with `rows`, `client_tag`, `need`, `max_tier`.
 3. If the tool returns `job_id`, poll `get_job_status` until completed/failed.
-4. Report counts only: rows_in, dms_found, emails_found, companies_upserted,
-   contacts_written, tier_breakdown. Do not dump contact payloads.
+4. Report counts only. Do not dump contact payloads.
 
 ## Tiers
 getleads → AI Ark → LeadMagic → Prospeo → FullEnrich.
@@ -46,8 +45,8 @@ linkedin_url, phone, place_id, city, state.
 
 WHEN_TO_USE = """
 Use this MCP when the user already has company domains (or known people) and
-needs decision-maker names and/or work emails written to Basco or Peterson
-Supabase tables.
+needs decision-maker names and/or work emails written to isolated per-client
+Supabase tables (basco, peterson, or any new snake_case client_tag).
 
 Do NOT use this MCP for Google Maps scraping, website crawling, permit data,
 or Apify contact-info scrapes.

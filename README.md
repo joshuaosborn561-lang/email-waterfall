@@ -6,16 +6,19 @@ It is **not** a Google Maps scraper and **not** a website crawler. Those stay in
 
 ## Clients
 
-`client_tag` is required on every write.
+`client_tag` is required on every write. Any snake_case tag works — call `ensure_client` or just `enrich_waterfall` (auto-ensures). New tags write `public.{tag}_wf_companies` / `public.{tag}_wf_contacts`.
 
 | Tag | Owner | ICP | Tables |
 |---|---|---|---|
 | `basco` | Carlos | Franchise new-car dealership rooftops near Clifton, NJ | `public.basco_companies` / `public.basco_contacts` |
 | `peterson` | Kyle | Commercial roofing / GCs / PMs in Dallas-Fort Worth | `public.peterson_companies` / `public.peterson_contacts` |
+| `goliath` | — | IT / security DMs | `public.goliath_wf_companies` / `public.goliath_wf_contacts` |
+| `salesglider` | — | Owner titles | `public.salesglider_wf_companies` / `public.salesglider_wf_contacts` |
+| *any new tag* | — | `profile=owner` (default) or `profile=service` | `public.{tag}_wf_*` |
 
 Basco titles (ranked): Service Director → Fixed Ops Director → Service Manager → Warranty Manager → Director/VP of Service → GM / Dealer Principal (fallback).
 
-Peterson titles: Owner, Founder, Principal, President, Partner, CEO, VP, Director, General Manager.
+Peterson / default owner titles: Owner, Founder, Principal, President, Partner, CEO, VP, Director, General Manager.
 
 ## Waterfall
 
@@ -55,7 +58,7 @@ Prospeo is fourth on the email lane (`POST /enrich-person`, verified email only)
 
 Response is **counts only**. Long HTTP runs return `job_id` — poll `get_job_status`.
 
-Other tools: `health`, `describe_client`, `get_job_status`, `list_background_jobs`.
+Other tools: `health`, `ensure_client`, `list_clients`, `describe_client`, `get_job_status`, `list_background_jobs`.
 
 ## Supabase writes
 

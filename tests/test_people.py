@@ -12,11 +12,12 @@ from email_waterfall.vendors.base import PersonHit
 def test_client_tag_required() -> None:
     with pytest.raises(ValueError, match="required"):
         normalize_client_tag("")
-    with pytest.raises(ValueError, match="basco"):
+    with pytest.raises(ValueError, match="reserved"):
         normalize_client_tag("shared")
     assert normalize_client_tag("Carlos") == "basco"
     assert normalize_client_tag("vasco") == "basco"
     assert normalize_client_tag("kyle") == "peterson"
+    assert normalize_client_tag("goliath") == "goliath"
 
 
 def test_client_tables_are_isolated() -> None:

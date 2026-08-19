@@ -19,11 +19,11 @@ mcp = MCPServer(
     title="Email Waterfall",
     description=(
         "Resolve decision-makers and work emails from company domains via a paid "
-        "vendor waterfall, then write isolated Basco / Peterson rows to Supabase. "
+        "vendor waterfall, then write isolated per-client rows to Supabase. "
         "Not a Maps scraper or website crawler."
     ),
     instructions=INSTRUCTIONS,
-    version="1.0.0",
+    version="1.1.0",
 )
 
 
@@ -78,7 +78,7 @@ def health() -> str:
     """Show which vendor keys and Supabase credentials are configured. Never prints secrets."""
     _ensure_repo_cwd()
     _reload_settings()
-    from email_waterfall.clients import CLIENTS
+    from email_waterfall.clients import list_registered_clients
     from email_waterfall.config import settings
 
     return _json(
@@ -97,17 +97,100 @@ def health() -> str:
                 "fullenrich": bool(settings.fullenrich_api_key),
             },
             "clients": {
-                tag: {
+                c.tag: {
                     "companies_table": c.companies_table,
                     "contacts_table": c.contacts_table,
                     "owner": c.owner,
+                    "profile": c.profile,
                     "titles": list(c.titles),
                 }
-                for tag, c in CLIENTS.items()
+                for c in list_registered_clients()
             },
             "max_tier_default": "fullenrich",
             "auth": "none",
+            "note": (
+                "Any snake_case client_tag works. Call ensure_client or "
+                "auto-ensures on enrich_waterfall."
+            ),
         }
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Ensure / register a client",
+        readOnlyHint=False,
+        openWorldHint=False,
+        destructiveHint=False,
+    )
+)
+def ensure_client(
+    client_tag: str,
+    display_name: str = "",
+    profile: str = "owner",
+    icp: str = "",
+    target_titles: str = "",
+) -> str:
+    """Create public.{tag}_wf_companies / _wf_contacts (or legacy names) and register.
+
+    profile = 'owner' (default ranked owner titles) or 'service' (basco-style).
+    target_titles = optional comma-separated ranked titles override.
+    Idempotent. enrich_waterfall also auto-ensures.
+    """
+    _ensure_repo_cwd()
+    _reload_settings()
+    from email_waterfall.clients import ensure_client as _ensure
+
+    client = _ensure(
+        client_tag,
+        display_name=display_name,
+        profile=profile,
+        icp=icp,
+        target_titles=target_titles,
+        write_supabase=True,
+    )
+    return _json(
+        {
+            "ok": True,
+            "client_tag": client.tag,
+            "display_name": client.display_name,
+            "owner": client.owner,
+            "profile": client.profile,
+            "icp": client.icp,
+            "companies_table": f"public.{client.companies_table}",
+            "contacts_table": f"public.{client.contacts_table}",
+            "target_titles": list(client.titles),
+        }
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List registered clients",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+def list_clients() -> str:
+    """List registered client_tags and their write tables. No lead payloads."""
+    _ensure_repo_cwd()
+    _reload_settings()
+    from email_waterfall.clients import list_registered_clients
+
+    return _json(
+        [
+            {
+                "client_tag": c.tag,
+                "display_name": c.display_name,
+                "owner": c.owner,
+                "profile": c.profile,
+                "companies_table": f"public.{c.companies_table}",
+                "contacts_table": f"public.{c.contacts_table}",
+                "target_titles": list(c.titles),
+                "icp": c.icp,
+            }
+            for c in list_registered_clients()
+        ]
     )
 
 
@@ -119,14 +202,16 @@ def health() -> str:
     )
 )
 def describe_client(client_tag: str) -> str:
-    """Show isolated tables and ranked DM titles for basco or peterson."""
+    """Show isolated tables and ranked DM titles for a client_tag."""
     from email_waterfall.clients import get_client
 
     client = get_client(client_tag)
     return _json(
         {
             "client_tag": client.tag,
+            "display_name": client.display_name,
             "owner": client.owner,
+            "profile": client.profile,
             "icp": client.icp,
             "companies_table": f"public.{client.companies_table}",
             "contacts_table": f"public.{client.contacts_table}",
@@ -186,7 +271,8 @@ def enrich_waterfall(
     `rows` = JSON list of {domain, company_name?, first_name?, last_name?, title?,
     email?, linkedin_url?, phone?, place_id?, city?, state?}. Domain is required.
 
-    client_tag is required: 'basco' | 'peterson'. Never omit it.
+    client_tag is required (any snake_case). Unknown tags auto-ensure write tables
+    as public.{tag}_wf_companies / _wf_contacts. Never omit it.
     need = 'dm' | 'email' | 'both'.
     max_tier = 'getleads' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
     (default 'fullenrich' — the waterfall runs every paid email tier).
