@@ -35,6 +35,7 @@ def _slow_vendor(*, latency: float = 0.2, email: str = "found@example.com"):
 
 def _patch_vendors(monkeypatch, gl) -> None:
     monkeypatch.setattr(waterfall, "GetLeadsClient", lambda: gl)
+    monkeypatch.setattr(waterfall, "SmartleadClient", lambda: _disabled())
     monkeypatch.setattr(waterfall, "AiArkClient", lambda: _disabled())
     monkeypatch.setattr(waterfall, "LeadMagicClient", lambda: _disabled())
     monkeypatch.setattr(waterfall, "ProspeoClient", lambda: _disabled())

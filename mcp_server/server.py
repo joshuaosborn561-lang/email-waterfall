@@ -49,6 +49,20 @@ def _reload_settings() -> None:
     cfg.settings = cfg.load_settings()
 
 
+def _smartlead_credits() -> dict[str, Any]:
+    from email_waterfall.vendors.smartlead import SmartleadClient
+
+    client = SmartleadClient(timeout=8)
+    if not client.enabled:
+        return {"configured": False}
+    try:
+        client.refresh_credits(force=True)
+    except Exception:
+        return {"configured": True, "available": None}
+    snap = client.credit_snapshot()
+    return {"configured": True, **snap}
+
+
 @mcp.resource(
     "email-waterfall://playbook",
     name="playbook",
@@ -91,11 +105,13 @@ def health() -> str:
             "supabase_url": settings.supabase_url or None,
             "vendors": {
                 "getleads": bool(settings.getleads_api_key),
+                "smartlead": bool(settings.smartlead_api_key),
                 "aiark": bool(settings.ai_ark_api_key),
                 "leadmagic": bool(settings.leadmagic_api_key),
                 "prospeo": bool(settings.prospeo_api_key),
                 "fullenrich": bool(settings.fullenrich_api_key),
             },
+            "smartlead_credits": _smartlead_credits(),
             "clients": {
                 c.tag: {
                     "companies_table": c.companies_table,
@@ -274,8 +290,8 @@ def enrich_waterfall(
     client_tag is required (any snake_case). Unknown tags auto-ensure write tables
     as public.{tag}_wf_companies / _wf_contacts. Never omit it.
     need = 'dm' | 'email' | 'both'.
-    max_tier = 'getleads' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
-    (default 'fullenrich' — the waterfall runs every paid email tier).
+    max_tier = 'getleads' | 'smartlead' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
+    (default 'fullenrich' — the waterfall runs every email tier).
 
     target_titles = comma-separated ranked titles. Empty uses the client default.
     require_title_match = drop people whose title is not in the ranked list

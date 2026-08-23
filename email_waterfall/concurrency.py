@@ -13,6 +13,7 @@ import requests
 
 TIER_ENV_KEYS: dict[str, str] = {
     "getleads": "GETLEADS_CONCURRENCY",
+    "smartlead": "SMARTLEAD_CONCURRENCY",
     "aiark": "AIARK_CONCURRENCY",
     "leadmagic": "LEADMAGIC_CONCURRENCY",
     "prospeo": "PROSPEO_CONCURRENCY",
@@ -21,6 +22,7 @@ TIER_ENV_KEYS: dict[str, str] = {
 
 DEFAULT_VENDOR_LIMITS: dict[str, int] = {
     "getleads": 10,
+    "smartlead": 8,
     "aiark": 8,
     "leadmagic": 6,
     "prospeo": 6,
