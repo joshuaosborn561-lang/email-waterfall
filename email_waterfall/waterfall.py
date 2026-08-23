@@ -1,9 +1,9 @@
 """DM / work-email enrichment waterfall.
 
 Tiers (fixed, no Maps, no website crawl, no Apify):
-  getleads → AI Ark → LeadMagic → Prospeo → FullEnrich
+  getleads → Smartlead (plan email finder) → AI Ark → LeadMagic → Prospeo → FullEnrich
 
-AI Ark is second on BOTH lanes:
+AI Ark is third on BOTH lanes after the included Smartlead allotment is used:
   people/DM: People Search by domain
   email: LinkedIn URL / person id / name+domain / phone → export/single
 
@@ -28,11 +28,19 @@ from .vendors.fullenrich import FullEnrichClient
 from .vendors.getleads import GetLeadsClient
 from .vendors.leadmagic import LeadMagicClient
 from .vendors.prospeo import ProspeoClient
+from .vendors.smartlead import SmartleadClient
 
 Need = Literal["email", "dm", "both"]
-MaxTier = Literal["getleads", "aiark", "leadmagic", "prospeo", "fullenrich"]
+MaxTier = Literal["getleads", "smartlead", "aiark", "leadmagic", "prospeo", "fullenrich"]
 
-TIER_ORDER: list[str] = ["getleads", "aiark", "leadmagic", "prospeo", "fullenrich"]
+TIER_ORDER: list[str] = [
+    "getleads",
+    "smartlead",
+    "aiark",
+    "leadmagic",
+    "prospeo",
+    "fullenrich",
+]
 TIER_RANK = {name: i for i, name in enumerate(TIER_ORDER)}
 DEFAULT_MAX_TIER: MaxTier = "fullenrich"
 
@@ -46,6 +54,9 @@ def normalize_max_tier(max_tier: str | None) -> str:
         "full-enrich": "fullenrich",
         "fe": "fullenrich",
         "get_leads": "getleads",
+        "smart_lead": "smartlead",
+        "smart-lead": "smartlead",
+        "sl": "smartlead",
         "lead_magic": "leadmagic",
         "prospector": "prospeo",
         "apify": "getleads",  # Apify is not in this service; start at first paid tier
@@ -131,6 +142,7 @@ class Waterfall:
         self,
         *,
         getleads: GetLeadsClient | None = None,
+        smartlead: SmartleadClient | None = None,
         ai_ark: AiArkClient | None = None,
         leadmagic: LeadMagicClient | None = None,
         prospeo: ProspeoClient | None = None,
@@ -141,6 +153,7 @@ class Waterfall:
         require_title_match: bool = True,
     ):
         self.getleads = getleads or GetLeadsClient()
+        self.smartlead = smartlead or SmartleadClient()
         self.ai_ark = ai_ark or AiArkClient()
         self.leadmagic = leadmagic or LeadMagicClient()
         self.prospeo = prospeo or ProspeoClient()
@@ -152,6 +165,7 @@ class Waterfall:
         self.tier_stats = {
             "aiark": _empty_stats(),
             "getleads": _empty_stats(),
+            "smartlead": _empty_stats(),
             "leadmagic": _empty_stats(),
             "prospeo": _empty_stats(),
             "fullenrich": _empty_stats(),
@@ -215,6 +229,17 @@ class Waterfall:
             hit = self.getleads.find_email(first, last, domain, company)
             if hit:
                 self._bump("getleads", "email_hits")
+
+        if (
+            not hit
+            and has_name_domain
+            and self.smartlead.enabled
+            and self._allowed("smartlead")
+        ):
+            self._bump("smartlead", "calls")
+            hit = self.smartlead.find_email(first, last, domain, company)
+            if hit:
+                self._bump("smartlead", "email_hits")
 
         if not hit and can_aiark and self.ai_ark.enabled and self._allowed("aiark"):
             self._bump("aiark", "calls")
@@ -477,6 +502,7 @@ def _enrich_one_row(
 def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]:
     for name, vendor in (
         ("getleads", wf.getleads),
+        ("smartlead", wf.smartlead),
         ("aiark", wf.ai_ark),
         ("leadmagic", wf.leadmagic),
         ("prospeo", wf.prospeo),
@@ -484,11 +510,18 @@ def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]
     ):
         wf.tier_stats[name]["vendor_calls"] = getattr(vendor, "calls", 0)
         wf.tier_stats[name]["vendor_hits"] = getattr(vendor, "hits", 0)
+        snap = getattr(vendor, "credit_snapshot", None)
+        if callable(snap):
+            credits = snap()
+            wf.tier_stats[name]["credits_available"] = credits.get("available")
+            wf.tier_stats[name]["credits_total"] = credits.get("total")
+            wf.tier_stats[name]["credits_used"] = credits.get("used")
+            wf.tier_stats[name]["credits_exhausted"] = bool(credits.get("exhausted"))
 
     tier_breakdown: dict[str, dict[str, Any]] = {}
     for tier_name, stats in wf.tier_stats.items():
         allowed = tier_allowed(tier_name, max_tier_n) if tier_name in TIER_RANK else True
-        tier_breakdown[tier_name] = {
+        row = {
             "attempts": int(stats.get("calls") or 0),
             "email_hits": int(stats.get("email_hits") or 0),
             "dm_hits": int(stats.get("dm_hits") or 0),
@@ -497,6 +530,12 @@ def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]
             "allowed_by_max_tier": allowed,
             "estimated_cost_usd": 0.0,
         }
+        if "credits_available" in stats:
+            row["credits_available"] = stats.get("credits_available")
+            row["credits_total"] = stats.get("credits_total")
+            row["credits_used"] = stats.get("credits_used")
+            row["credits_exhausted"] = bool(stats.get("credits_exhausted"))
+        tier_breakdown[tier_name] = row
     return tier_breakdown
 
 
@@ -534,6 +573,7 @@ def _result_payload(
         "require_title_match": bool(require_title_match),
         "vendors_enabled": {
             "getleads": wf.getleads.enabled and wf._allowed("getleads"),
+            "smartlead": wf.smartlead.enabled and wf._allowed("smartlead"),
             "aiark": wf.ai_ark.enabled and wf._allowed("aiark"),
             "leadmagic": wf.leadmagic.enabled and wf._allowed("leadmagic"),
             "prospeo": wf.prospeo.enabled and wf._allowed("prospeo"),

@@ -31,10 +31,15 @@ Never omit `client_tag`. Never write to a shared contacts table.
 4. Report counts only. Do not dump contact payloads.
 
 ## Tiers
-getleads → AI Ark → LeadMagic → Prospeo → FullEnrich.
+getleads → Smartlead (included plan email finder) → AI Ark → LeadMagic →
+Prospeo → FullEnrich.
 Default max_tier is fullenrich (alias `fe`). Cap earlier with max_tier if needed.
 
-AI Ark is second on the email lane too: LinkedIn URL, AI Ark person id,
+Smartlead uses the monthly finder allotment on the Smartlead plan. Credits are
+checked via search-analytics; once they are spent the cascade falls through to
+the paid tiers. It is name+domain email only — not a DM people search.
+
+AI Ark is next on the email lane: LinkedIn URL, AI Ark person id,
 name+domain, or phone → verified work email. It is not skipped just because
 a row already has a name.
 

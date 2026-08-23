@@ -21,8 +21,9 @@ def _vendor(*, enabled: bool = True, people=None, email=None):
     return m
 
 
-def _patch_clients(monkeypatch, *, gl, ark, lm, fe, prospeo=None) -> None:
+def _patch_clients(monkeypatch, *, gl, ark, lm, fe, prospeo=None, smartlead=None) -> None:
     monkeypatch.setattr(waterfall, "GetLeadsClient", lambda: gl)
+    monkeypatch.setattr(waterfall, "SmartleadClient", lambda: smartlead or _vendor(enabled=False))
     monkeypatch.setattr(waterfall, "AiArkClient", lambda: ark)
     monkeypatch.setattr(waterfall, "LeadMagicClient", lambda: lm)
     monkeypatch.setattr(waterfall, "ProspeoClient", lambda: prospeo or _vendor(enabled=False))
@@ -322,13 +323,122 @@ def test_apify_is_not_a_real_tier() -> None:
     assert "apify" not in waterfall.TIER_ORDER
     assert waterfall.normalize_max_tier("apify") == "getleads"
     assert waterfall.TIER_ORDER[0] == "getleads"
-    assert waterfall.TIER_ORDER[1] == "aiark"
-    assert waterfall.TIER_ORDER[2] == "leadmagic"
-    assert waterfall.TIER_ORDER[3] == "prospeo"
-    assert waterfall.TIER_ORDER[4] == "fullenrich"
+    assert waterfall.TIER_ORDER[1] == "smartlead"
+    assert waterfall.TIER_ORDER[2] == "aiark"
+    assert waterfall.TIER_ORDER[3] == "leadmagic"
+    assert waterfall.TIER_ORDER[4] == "prospeo"
+    assert waterfall.TIER_ORDER[5] == "fullenrich"
     assert waterfall.DEFAULT_MAX_TIER == "fullenrich"
     assert waterfall.normalize_max_tier("prospector") == "prospeo"
     assert waterfall.normalize_max_tier("fe") == "fullenrich"
+    assert waterfall.normalize_max_tier("sl") == "smartlead"
+
+
+def test_smartlead_runs_after_getleads_before_aiark(monkeypatch) -> None:
+    sink: dict = {}
+    gl = _vendor(email=None)
+    sl = _vendor(
+        email=EmailHit(email="jane@roofco.com", source_tier="smartlead", status="Valid")
+    )
+    ark = _vendor(
+        email=EmailHit(email="should-not@x.com", source_tier="aiark")
+    )
+    _patch_clients(
+        monkeypatch,
+        gl=gl,
+        ark=ark,
+        lm=_vendor(enabled=False),
+        fe=_vendor(enabled=False),
+        smartlead=sl,
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+                "company_name": "Roof Co",
+            }
+        ],
+        client_tag="peterson",
+        need="email",
+        write_supabase=True,
+    )
+    assert out["emails_found"] == 1
+    gl.find_email.assert_called()
+    sl.find_email.assert_called()
+    ark.find_email.assert_not_called()
+    assert sink["companies"][0]["email_source_tier"] == "smartlead"
+    assert out["vendors_enabled"]["smartlead"] is True
+
+
+def test_smartlead_exhausted_falls_through_to_aiark(monkeypatch) -> None:
+    sink: dict = {}
+    sl = _vendor(enabled=False)
+    ark = _vendor(
+        email=EmailHit(email="jane@roofco.com", source_tier="aiark", status="found")
+    )
+    _patch_clients(
+        monkeypatch,
+        gl=_vendor(email=None),
+        ark=ark,
+        lm=_vendor(enabled=False),
+        fe=_vendor(enabled=False),
+        smartlead=sl,
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+            }
+        ],
+        client_tag="peterson",
+        need="email",
+        write_supabase=True,
+    )
+    sl.find_email.assert_not_called()
+    ark.find_email.assert_called()
+    assert out["emails_found"] == 1
+    assert sink["companies"][0]["email_source_tier"] == "aiark"
+
+
+def test_max_tier_getleads_blocks_smartlead(monkeypatch) -> None:
+    sink: dict = {}
+    sl = _vendor(
+        email=EmailHit(email="jane@roofco.com", source_tier="smartlead")
+    )
+    _patch_clients(
+        monkeypatch,
+        gl=_vendor(email=None),
+        ark=_vendor(enabled=False),
+        lm=_vendor(enabled=False),
+        fe=_vendor(enabled=False),
+        smartlead=sl,
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+            }
+        ],
+        client_tag="peterson",
+        need="email",
+        max_tier="getleads",
+        write_supabase=True,
+    )
+    sl.find_email.assert_not_called()
+    assert out["vendors_enabled"]["smartlead"] is False
+    assert out["max_tier"] == "getleads"
 
 
 def test_aiark_is_second_email_tier(monkeypatch) -> None:

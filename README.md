@@ -23,12 +23,14 @@ Peterson / default owner titles: Owner, Founder, Principal, President, Partner, 
 ## Waterfall
 
 ```
-getleads → AI Ark → LeadMagic → Prospeo → FullEnrich
+getleads → Smartlead → AI Ark → LeadMagic → Prospeo → FullEnrich
 ```
 
-AI Ark is **second on both lanes**. For emails it accepts a LinkedIn URL, an AI Ark person id, name + domain, and/or phone (`POST /v2/people/export/single` after People Search when needed). It is not people-discovery-only.
+Smartlead is the **included plan email finder** (name + domain via `POST .../find-emails`). Remaining allotment is read from `GET .../search-analytics` (`availableCredits`). When credits are spent, the cascade falls through to paid tiers. It is not used for DM people search.
 
-Prospeo is fourth on the email lane (`POST /enrich-person`, verified email only). `max_tier` default is `fullenrich` (alias `fe`). Cap earlier with `max_tier` if you want to stop before FullEnrich.
+AI Ark is next on both lanes. For emails it accepts a LinkedIn URL, an AI Ark person id, name + domain, and/or phone (`POST /v2/people/export/single` after People Search when needed). It is not people-discovery-only.
+
+Prospeo is later on the email lane (`POST /enrich-person`, verified email only). `max_tier` default is `fullenrich` (alias `fe`). Cap earlier with `max_tier` if you want to stop before FullEnrich.
 
 ## MCP tool: `enrich_waterfall`
 
