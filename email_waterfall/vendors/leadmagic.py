@@ -1,4 +1,4 @@
-"""LeadMagic — email finder + ranked role finder."""
+"""LeadMagic — email finder, ranked role finder, and mobile finder."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 from email_waterfall import http_client
 from email_waterfall.config import settings
 
-from .base import EmailHit, PersonHit, person_from_row
+from .base import EmailHit, PersonHit, PhoneHit, person_from_row
 
 
 class LeadMagicClient:
@@ -151,3 +151,44 @@ class LeadMagicClient:
                 self.hits += 1
 
         return found[:limit]
+
+    def find_mobile(
+        self,
+        *,
+        linkedin_url: str = "",
+        work_email: str = "",
+        personal_email: str = "",
+    ) -> PhoneHit | None:
+        """Cellphone via POST /v1/people/mobile-finder (5 credits on hit, free miss)."""
+        if not self.enabled:
+            return None
+        body: dict[str, Any] = {}
+        profile = (linkedin_url or "").strip()
+        work = (work_email or "").strip().lower()
+        personal = (personal_email or "").strip().lower()
+        if profile:
+            body["profile_url"] = profile
+        if work:
+            body["work_email"] = work
+        if personal:
+            body["personal_email"] = personal
+        if not body:
+            return None
+        data = self._post("/v1/people/mobile-finder", body)
+        if data is None:
+            data = self._post("/mobile-finder", body)
+        if not isinstance(data, dict):
+            return None
+        mobile = (
+            data.get("mobile_number")
+            or data.get("mobile")
+            or data.get("phone")
+            or data.get("cellphone")
+            or ""
+        )
+        mobile = str(mobile).strip() if mobile is not None else ""
+        digits = "".join(c for c in mobile if c.isdigit())
+        if not mobile or len(digits) < 7:
+            return None
+        self.hits += 1
+        return PhoneHit(phone=mobile, source_tier=self.tier, raw=data)

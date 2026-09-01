@@ -33,25 +33,31 @@ Never omit `client_tag`. Never write to a shared contacts table.
 ## Tiers
 getleads → Smartlead (included plan email finder) → AI Ark → LeadMagic →
 Prospeo → FullEnrich.
-Default max_tier is fullenrich (alias `fe`). Cap earlier with max_tier if needed.
+Default max_tier is **leadmagic** (alias `lm`). Prospeo and FullEnrich do not
+run unless you raise max_tier.
 
 Smartlead uses the monthly finder allotment on the Smartlead plan. Credits are
 checked via search-analytics; once they are spent the cascade falls through to
 the paid tiers. It is name+domain email only — not a DM people search.
 
-AI Ark is next on the email lane: LinkedIn URL, AI Ark person id,
-name+domain, or phone → verified work email. It is not skipped just because
-a row already has a name.
+AI Ark is fully used on all three lanes (not people-only):
+- people/DM: People Search by domain + ranked titles
+- email: LinkedIn URL, AI Ark person id, name+domain, or phone →
+  `POST /v2/people/export/single`
+- cellphone: LinkedIn URL or name+domain → `POST /v2/people/mobile-phone-finder`
+
+Cellphones also fall through to LeadMagic mobile-finder (and Prospeo if
+max_tier allows). Input `phone` / `cellphone` / `mobile` is written as cellphone.
 
 ## Input row shape
-domain (required), company_name, first_name, last_name, title, email,
-linkedin_url, phone, place_id, city, state.
+domain (required, or derived from email), company_name, first_name, last_name,
+title, email, linkedin_url, phone / cellphone / mobile, place_id, city, state.
 """
 
 WHEN_TO_USE = """
 Use this MCP when the user already has company domains (or known people) and
-needs decision-maker names and/or work emails written to isolated per-client
-Supabase tables (basco, peterson, or any new snake_case client_tag).
+needs decision-maker names, work emails, and/or cellphones written to isolated
+per-client Supabase tables (basco, peterson, or any new snake_case client_tag).
 
 Do NOT use this MCP for Google Maps scraping, website crawling, permit data,
 or Apify contact-info scrapes.

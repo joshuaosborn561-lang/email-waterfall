@@ -47,6 +47,7 @@ def _disabled():
     m.enabled = False
     m.calls = 0
     m.hits = 0
+    m.find_mobile.return_value = None
     return m
 
 
@@ -67,6 +68,7 @@ def _parity_keys(result: dict) -> dict:
         "rows_in": result["rows_in"],
         "emails_found": result["emails_found"],
         "dms_found": result["dms_found"],
+        "phones_found": result.get("phones_found", 0),
         "tier_stats": {
             tier: {
                 "calls": stats.get("calls", 0),

@@ -102,3 +102,28 @@ def test_find_email_linkedin_only(monkeypatch) -> None:
     hit = client.find_email(linkedin_url="https://www.linkedin.com/in/pat-lee")
     assert hit is not None
     assert hit.email == "pat@x.com"
+
+
+def test_find_mobile_enrich_mobile(monkeypatch) -> None:
+    client = ProspeoClient(api_key="pk_test")
+
+    def fake_post(tier, url, json=None, headers=None, timeout=45):
+        assert json["enrich_mobile"] is True
+        assert json["only_verified_email"] is False
+
+        class Resp:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "error": False,
+                    "person": {"mobile": {"mobile": "+12015550100"}},
+                }
+
+        return Resp()
+
+    _patch_post(monkeypatch, fake_post)
+    hit = client.find_mobile("Jane", "Smith", "roofco.com")
+    assert hit is not None
+    assert hit.phone == "+12015550100"
+    assert hit.source_tier == "prospeo"

@@ -28,9 +28,15 @@ getleads → Smartlead → AI Ark → LeadMagic → Prospeo → FullEnrich
 
 Smartlead is the **included plan email finder** (name + domain via `POST .../find-emails`). Remaining allotment is read from `GET .../search-analytics` (`availableCredits`). When credits are spent, the cascade falls through to paid tiers. It is not used for DM people search.
 
-AI Ark is next on both lanes. For emails it accepts a LinkedIn URL, an AI Ark person id, name + domain, and/or phone (`POST /v2/people/export/single` after People Search when needed). It is not people-discovery-only.
+AI Ark is next on **people, email, and cellphone** (not people-only):
 
-Prospeo is later on the email lane (`POST /enrich-person`, verified email only). `max_tier` default is `fullenrich` (alias `fe`). Cap earlier with `max_tier` if you want to stop before FullEnrich.
+- People/DM: People Search by domain + ranked titles
+- Email: LinkedIn URL, AI Ark person id, name + domain, and/or phone → `POST /v2/people/export/single`
+- Cellphone: LinkedIn URL or name + domain → `POST /v2/people/mobile-phone-finder` (5 credits on hit)
+
+LeadMagic mobile-finder runs after AI Ark when a LinkedIn URL or work email is available. Prospeo `enrich_mobile` only runs if `max_tier` is raised to `prospeo` or `fullenrich`.
+
+`max_tier` default is `leadmagic` (alias `lm`). Raise it to `prospeo` / `fullenrich` (alias `fe`) if you want later paid email tiers.
 
 ## MCP tool: `enrich_waterfall`
 
@@ -44,14 +50,16 @@ Prospeo is later on the email lane (`POST /enrich-person`, verified email only).
       "last_name": "",
       "title": "",
       "email": "",
+      "linkedin_url": "",
+      "phone": "",
       "place_id": "",
       "city": "",
       "state": ""
     }
   ],
-  "need": "dm",
+  "need": "both",
   "client_tag": "basco",
-  "max_tier": "fullenrich",
+  "max_tier": "leadmagic",
   "target_titles": "Service Director, Fixed Operations Director, Service Manager, Warranty Manager, General Manager, Dealer Principal, GM",
   "require_title_match": true,
   "background": true

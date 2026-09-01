@@ -1,8 +1,11 @@
-"""AI Ark — second waterfall tier for people AND work-email lookup.
+"""AI Ark — people, work-email, AND cellphone lookup (not people-only).
 
 Email path (sync, Clay-compatible v2):
   LinkedIn URL or AI Ark person id → POST /v2/people/export/single
   name + domain (or phone) → People Search → person id → export/single
+
+Cellphone path (sync, Clay-compatible v2):
+  LinkedIn URL, or name + domain → POST /v2/people/mobile-phone-finder
 
 Do not use /v1/people/email-finder (async trackId). Do not use AI Ark for
 email-to-profile reverse lookup.
@@ -15,7 +18,7 @@ from typing import Any
 from email_waterfall import http_client
 from email_waterfall.config import settings
 
-from .base import EmailHit, PersonHit, split_name
+from .base import EmailHit, PersonHit, PhoneHit, split_name
 
 
 def _pick_email(payload: Any) -> tuple[str, str]:
@@ -49,6 +52,54 @@ def _pick_email(payload: Any) -> tuple[str, str]:
     if flat and "@" in flat:
         return flat.lower(), "found"
     return "", ""
+
+
+def _ok_phone(value: str) -> bool:
+    digits = "".join(c for c in value if c.isdigit())
+    return len(digits) >= 7
+
+
+def _flatten_phones(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw = value.strip()
+        return [raw] if raw and _ok_phone(raw) else []
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            out.extend(_flatten_phones(item))
+        return out
+    return []
+
+
+def _pick_mobile(payload: Any) -> str:
+    """Return first mobile from v2 mobile-phone-finder / export payloads."""
+    if not isinstance(payload, dict):
+        return ""
+    data = payload.get("data") if "data" in payload else payload
+    if data is None:
+        return ""
+    if isinstance(data, list):
+        phones = _flatten_phones(data)
+        return phones[0] if phones else ""
+    if not isinstance(data, dict):
+        return ""
+    nested = data.get("data")
+    phones = _flatten_phones(nested)
+    if phones:
+        return phones[0]
+    for key in ("mobile", "phone", "mobile_number", "cellphone"):
+        val = data.get(key)
+        if isinstance(val, str) and _ok_phone(val):
+            return val.strip()
+        phones = _flatten_phones(val)
+        if phones:
+            return phones[0]
+    profile = data.get("profile") if isinstance(data.get("profile"), dict) else {}
+    for key in ("phone", "mobile", "cellphone"):
+        val = str(profile.get(key) or "").strip()
+        if val and _ok_phone(val):
+            return val
+    return ""
 
 
 def _person_id(row: dict[str, Any]) -> str:
@@ -116,10 +167,14 @@ class AiArkClient:
         phone = str(
             profile.get("phone")
             or profile.get("mobile")
+            or profile.get("cellphone")
             or row.get("phone")
             or row.get("mobile")
+            or row.get("cellphone")
             or ""
         ).strip()
+        if not phone:
+            phone = _pick_mobile(row)
         return PersonHit(
             first_name=first,
             last_name=last,
@@ -165,6 +220,19 @@ class AiArkClient:
             }
         if linkedin_url:
             contact["linkedin"] = {"any": {"include": [linkedin_url]}}
+        if titles:
+            contact["experience"] = {
+                "latest": {
+                    "title": {
+                        "any": {
+                            "include": {
+                                "mode": "SMART",
+                                "content": [t for t in titles if t][:8],
+                            }
+                        }
+                    }
+                }
+            }
         if phone:
             contact["keyword"] = {
                 "any": {
@@ -215,7 +283,8 @@ class AiArkClient:
         if status in (0, 400, 401, 402, 429) or status >= 500:
             return None
         # v2 wraps misses as HTTP 200 + data:null (sometimes nested status 404).
-        email, email_status = _pick_email(data if isinstance(data, dict) else {})
+        payload = data if isinstance(data, dict) else {}
+        email, email_status = _pick_email(payload)
         if not email:
             return None
         self.hits += 1
@@ -223,7 +292,8 @@ class AiArkClient:
             email=email,
             source_tier=self.tier,
             status=email_status or "found",
-            raw=data if isinstance(data, dict) else {},
+            phone=_pick_mobile(payload),
+            raw=payload,
         )
 
     def find_email(
@@ -277,6 +347,7 @@ class AiArkClient:
                     email=person.email,
                     source_tier=self.tier,
                     status="found",
+                    phone=person.phone,
                     raw=person.raw,
                 )
             pid = _person_id(person.raw)
@@ -285,3 +356,41 @@ class AiArkClient:
             if hit:
                 return hit
         return None
+
+    def find_mobile(
+        self,
+        first_name: str = "",
+        last_name: str = "",
+        domain: str = "",
+        company_name: str = "",
+        *,
+        linkedin_url: str = "",
+        full_name: str = "",
+        work_email: str = "",
+    ) -> PhoneHit | None:
+        """Cellphone via POST /v2/people/mobile-phone-finder (5 credits on hit)."""
+        if not self.enabled:
+            return None
+        linkedin_url = (linkedin_url or "").strip()
+        domain = (domain or "").strip()
+        full = (full_name or f"{first_name} {last_name}".strip()).strip()
+        body: dict[str, str] = {}
+        if linkedin_url:
+            body["linkedin"] = linkedin_url
+        elif domain and full:
+            body["domain"] = domain
+            body["name"] = full
+        else:
+            return None
+        status, data = self._post("/v2/people/mobile-phone-finder", body)
+        if status in (0, 400, 401, 402, 429) or status >= 500:
+            return None
+        phone = _pick_mobile(data if isinstance(data, dict) else {})
+        if not phone:
+            return None
+        self.hits += 1
+        return PhoneHit(
+            phone=phone,
+            source_tier=self.tier,
+            raw=data if isinstance(data, dict) else {},
+        )

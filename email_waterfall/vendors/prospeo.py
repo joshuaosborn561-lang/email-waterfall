@@ -12,7 +12,7 @@ from typing import Any
 from email_waterfall import http_client
 from email_waterfall.config import settings
 
-from .base import EmailHit
+from .base import EmailHit, PhoneHit
 
 
 class ProspeoClient:
@@ -114,3 +114,83 @@ class ProspeoClient:
             status=status or "VERIFIED",
             raw=body,
         )
+
+    def find_mobile(
+        self,
+        first_name: str = "",
+        last_name: str = "",
+        domain: str = "",
+        company_name: str = "",
+        *,
+        linkedin_url: str = "",
+        full_name: str = "",
+    ) -> PhoneHit | None:
+        """Cellphone via enrich-person with enrich_mobile=True (later than LeadMagic)."""
+        if not self.enabled:
+            return None
+        data: dict[str, str] = {}
+        if linkedin_url:
+            data["linkedin_url"] = linkedin_url.strip()
+        if first_name:
+            data["first_name"] = first_name.strip()
+        if last_name:
+            data["last_name"] = last_name.strip()
+        full = (full_name or f"{first_name} {last_name}".strip()).strip()
+        if full and not (first_name and last_name):
+            data["full_name"] = full
+        if domain:
+            data["company_website"] = domain.strip()
+        if company_name:
+            data["company_name"] = company_name.strip()
+
+        has_linkedin = bool(data.get("linkedin_url"))
+        has_name_company = bool(
+            ((data.get("first_name") and data.get("last_name")) or data.get("full_name"))
+            and (
+                data.get("company_website")
+                or data.get("company_name")
+                or data.get("company_linkedin_url")
+            )
+        )
+        if not has_linkedin and not has_name_company:
+            return None
+
+        self.calls += 1
+        r = http_client.post(
+            self.tier,
+            f"{self.base_url}/enrich-person",
+            json={
+                "only_verified_email": False,
+                "enrich_mobile": True,
+                "data": data,
+            },
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        if r is None:
+            return None
+        try:
+            body: Any = r.json()
+        except ValueError:
+            return None
+        if not isinstance(body, dict):
+            return None
+        if r.status_code >= 400 or body.get("error") is True:
+            return None
+
+        person = body.get("person") if isinstance(body.get("person"), dict) else {}
+        mobile = person.get("mobile") or person.get("phone") or person.get("cellphone")
+        if isinstance(mobile, dict):
+            mobile = (
+                mobile.get("mobile")
+                or mobile.get("phone")
+                or mobile.get("number")
+                or mobile.get("mobile_number")
+                or ""
+            )
+        mobile = str(mobile or "").strip()
+        digits = "".join(c for c in mobile if c.isdigit())
+        if not mobile or len(digits) < 7:
+            return None
+        self.hits += 1
+        return PhoneHit(phone=mobile, source_tier=self.tier, raw=body)
