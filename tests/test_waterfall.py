@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from email_waterfall import waterfall
-from email_waterfall.vendors.base import EmailHit, PersonHit
+from email_waterfall.vendors.base import EmailHit, PersonHit, PhoneHit
 
 
 def _vendor(*, enabled: bool = True, people=None, email=None):
@@ -18,6 +18,7 @@ def _vendor(*, enabled: bool = True, people=None, email=None):
     m.find_people.return_value = people or []
     m.find_email.return_value = email
     m.find_email_bulk.return_value = []
+    m.find_mobile.return_value = None
     return m
 
 
@@ -128,6 +129,7 @@ def test_fullenrich_runs_when_max_tier_allows(monkeypatch) -> None:
         ],
         client_tag="peterson",
         need="email",
+        max_tier="fullenrich",
         write_supabase=True,
     )
     fe.find_email.assert_called_once()
@@ -328,7 +330,8 @@ def test_apify_is_not_a_real_tier() -> None:
     assert waterfall.TIER_ORDER[3] == "leadmagic"
     assert waterfall.TIER_ORDER[4] == "prospeo"
     assert waterfall.TIER_ORDER[5] == "fullenrich"
-    assert waterfall.DEFAULT_MAX_TIER == "fullenrich"
+    assert waterfall.DEFAULT_MAX_TIER == "leadmagic"
+    assert waterfall.normalize_max_tier("lm") == "leadmagic"
     assert waterfall.normalize_max_tier("prospector") == "prospeo"
     assert waterfall.normalize_max_tier("fe") == "fullenrich"
     assert waterfall.normalize_max_tier("sl") == "smartlead"
@@ -567,6 +570,7 @@ def test_prospeo_runs_after_leadmagic(monkeypatch) -> None:
         ],
         client_tag="peterson",
         need="email",
+        max_tier="fullenrich",
         write_supabase=True,
     )
     assert out["emails_found"] == 1
@@ -609,6 +613,191 @@ def test_max_tier_leadmagic_blocks_prospeo(monkeypatch) -> None:
     prospeo.find_email.assert_not_called()
     assert out["vendors_enabled"]["prospeo"] is False
     assert out["max_tier"] == "leadmagic"
+
+
+def test_default_max_tier_blocks_prospeo_and_fullenrich(monkeypatch) -> None:
+    sink: dict = {}
+    prospeo = _vendor(
+        email=EmailHit(email="jane@roofco.com", source_tier="prospeo")
+    )
+    fe = _vendor(enabled=True)
+    fe.find_email_bulk.return_value = [
+        EmailHit(email="should-not@x.com", source_tier="fullenrich")
+    ]
+    _patch_clients(
+        monkeypatch,
+        gl=_vendor(email=None),
+        ark=_vendor(email=None),
+        lm=_vendor(email=None),
+        fe=fe,
+        prospeo=prospeo,
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+            }
+        ],
+        client_tag="peterson",
+        need="email",
+        write_supabase=True,
+    )
+    assert out["max_tier"] == "leadmagic"
+    prospeo.find_email.assert_not_called()
+    prospeo.find_mobile.assert_not_called()
+    fe.find_email.assert_not_called()
+    fe.find_email_bulk.assert_not_called()
+    assert out["vendors_enabled"]["prospeo"] is False
+    assert out["vendors_enabled"]["fullenrich"] is False
+    assert out["vendors_enabled"]["leadmagic"] is True
+
+
+def test_input_phone_writes_cellphone(monkeypatch) -> None:
+    sink: dict = {}
+    ark = _vendor(enabled=True)
+    lm = _vendor(enabled=True)
+    _patch_clients(
+        monkeypatch,
+        gl=_vendor(email=None),
+        ark=ark,
+        lm=lm,
+        fe=_vendor(enabled=False),
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+                "cellphone": "201-555-0100",
+            }
+        ],
+        client_tag="peterson",
+        need="email",
+        write_supabase=True,
+    )
+    assert out["phones_found"] == 1
+    assert sink["contacts"][0]["cellphone"] == "201-555-0100"
+    ark.find_mobile.assert_not_called()
+    lm.find_mobile.assert_not_called()
+
+
+def test_aiark_mobile_finder_writes_cellphone(monkeypatch) -> None:
+    sink: dict = {}
+    ark = _vendor(
+        email=EmailHit(email="jane@roofco.com", source_tier="aiark"),
+    )
+    ark.find_mobile.return_value = PhoneHit(
+        phone="+12015550100", source_tier="aiark"
+    )
+    lm = _vendor(enabled=True)
+    _patch_clients(
+        monkeypatch,
+        gl=_vendor(email=None),
+        ark=ark,
+        lm=lm,
+        fe=_vendor(enabled=False),
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+            }
+        ],
+        client_tag="peterson",
+        need="both",
+        write_supabase=True,
+    )
+    assert out["phones_found"] == 1
+    assert sink["contacts"][0]["cellphone"] == "+12015550100"
+    ark.find_email.assert_called()
+    ark.find_mobile.assert_called()
+    lm.find_mobile.assert_not_called()
+
+
+def test_leadmagic_mobile_after_aiark_miss(monkeypatch) -> None:
+    sink: dict = {}
+    ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))
+    ark.find_mobile.return_value = None
+    lm = _vendor(enabled=True)
+    lm.find_mobile.return_value = PhoneHit(
+        phone="+19725550199", source_tier="leadmagic"
+    )
+    _patch_clients(
+        monkeypatch,
+        gl=_vendor(email=None),
+        ark=ark,
+        lm=lm,
+        fe=_vendor(enabled=False),
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+                "linkedin_url": "https://www.linkedin.com/in/jane-smith",
+            }
+        ],
+        client_tag="peterson",
+        need="email",
+        write_supabase=True,
+    )
+    assert out["phones_found"] == 1
+    assert sink["contacts"][0]["cellphone"] == "+19725550199"
+    ark.find_mobile.assert_called()
+    lm.find_mobile.assert_called()
+
+
+def test_need_phone_resolves_dm_email_and_mobile(monkeypatch) -> None:
+    sink: dict = {}
+    gl = _vendor(
+        people=[
+            PersonHit(
+                first_name="Jane",
+                last_name="Smith",
+                title="Owner",
+                linkedin_url="https://www.linkedin.com/in/jane-smith",
+                source_tier="getleads",
+            )
+        ]
+    )
+    ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))
+    ark.find_mobile.return_value = PhoneHit(
+        phone="+19725550111", source_tier="aiark"
+    )
+    _patch_clients(
+        monkeypatch,
+        gl=gl,
+        ark=ark,
+        lm=_vendor(enabled=False),
+        fe=_vendor(enabled=False),
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [{"domain": "roofco.com", "company_name": "Roof Co"}],
+        client_tag="peterson",
+        need="phone",
+        write_supabase=True,
+    )
+    assert out["need"] == "phone"
+    assert out["dms_found"] == 1
+    assert out["emails_found"] == 1
+    assert out["phones_found"] == 1
+    assert sink["contacts"][0]["cellphone"] == "+19725550111"
 
 
 def test_empty_rows() -> None:

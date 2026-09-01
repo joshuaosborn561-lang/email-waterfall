@@ -23,7 +23,7 @@ mcp = MCPServer(
         "Not a Maps scraper or website crawler."
     ),
     instructions=INSTRUCTIONS,
-    version="1.1.0",
+    version="1.2.0",
 )
 
 
@@ -122,7 +122,7 @@ def health() -> str:
                 }
                 for c in list_registered_clients()
             },
-            "max_tier_default": "fullenrich",
+            "max_tier_default": "leadmagic",
             "auth": "none",
             "note": (
                 "Any snake_case client_tag works. Call ensure_client or "
@@ -277,21 +277,23 @@ def enrich_waterfall(
     rows: Any,
     client_tag: str,
     need: str = "both",
-    max_tier: str = "fullenrich",
+    max_tier: str = "leadmagic",
     target_titles: str = "",
     require_title_match: bool = True,
     background: bool = True,
 ) -> str:
-    """Resolve DMs + work emails via paid vendors; write to public.{client}_* tables.
+    """Resolve DMs + work emails + cellphones via paid vendors; write public.{client}_*.
 
     `rows` = JSON list of {domain, company_name?, first_name?, last_name?, title?,
-    email?, linkedin_url?, phone?, place_id?, city?, state?}. Domain is required.
+    email?, linkedin_url?, phone?, cellphone?, mobile?, place_id?, city?, state?}.
+    Domain is required (or derived from email). Phone / cellphone / mobile are
+    accepted as input and written back as cellphone.
 
     client_tag is required (any snake_case). Unknown tags auto-ensure write tables
     as public.{tag}_wf_companies / _wf_contacts. Never omit it.
-    need = 'dm' | 'email' | 'both'.
+    need = 'dm' | 'email' | 'both' | 'phone'.
     max_tier = 'getleads' | 'smartlead' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
-    (default 'fullenrich' — the waterfall runs every email tier).
+    (default 'leadmagic' / alias 'lm' — stops before Prospeo and FullEnrich).
 
     target_titles = comma-separated ranked titles. Empty uses the client default.
     require_title_match = drop people whose title is not in the ranked list
@@ -305,8 +307,8 @@ def enrich_waterfall(
     from email_waterfall.clients import get_client
 
     need_norm = (need or "both").strip().lower()
-    if need_norm not in ("email", "dm", "both"):
-        raise ValueError("need must be 'email', 'dm', or 'both'")
+    if need_norm not in ("email", "dm", "both", "phone"):
+        raise ValueError("need must be 'email', 'dm', 'both', or 'phone'")
     client = get_client(client_tag)
     max_tier_n = wf.normalize_max_tier(max_tier)
 

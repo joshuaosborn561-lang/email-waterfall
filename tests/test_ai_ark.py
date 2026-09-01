@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from email_waterfall.vendors.ai_ark import AiArkClient, _pick_email
+from email_waterfall.vendors.ai_ark import AiArkClient, _pick_email, _pick_mobile
 
 
 def test_pick_email_v2_envelope() -> None:
@@ -30,6 +30,19 @@ def test_pick_email_v2_miss_is_empty() -> None:
     )
     assert email == ""
     assert status == ""
+
+
+def test_pick_mobile_nested_array() -> None:
+    assert (
+        _pick_mobile(
+            {
+                "status": 200,
+                "data": {"id": "x", "data": [["+13152468945"]]},
+            }
+        )
+        == "+13152468945"
+    )
+    assert _pick_mobile({"status": 404, "data": None}) == ""
 
 
 def test_pick_email_v1_output_list() -> None:
@@ -123,3 +136,85 @@ def test_find_email_phone_can_search(monkeypatch) -> None:
     hit = client.find_email(phone="2015550100", domain="paragonhonda.com")
     assert hit is not None
     assert hit.email == "pat@x.com"
+
+
+def test_find_people_sends_ranked_titles(monkeypatch) -> None:
+    client = AiArkClient(api_key="tok")
+
+    def fake_post(path, body):
+        assert path.endswith("/v1/people")
+        titles = body["contact"]["experience"]["latest"]["title"]["any"]["include"][
+            "content"
+        ]
+        assert "Service Director" in titles
+        return 200, {
+            "content": [
+                {
+                    "id": "p1",
+                    "profile": {
+                        "first_name": "Pat",
+                        "last_name": "Lee",
+                        "title": "Service Director",
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    people = client.find_people(
+        "paragonhonda.com", titles=["Service Director", "Service Manager"]
+    )
+    assert len(people) == 1
+    assert people[0].title == "Service Director"
+
+
+def test_find_mobile_linkedin(monkeypatch) -> None:
+    client = AiArkClient(api_key="tok")
+
+    def fake_post(path, body):
+        assert path.endswith("/v2/people/mobile-phone-finder")
+        assert body["linkedin"].startswith("https://www.linkedin.com")
+        return 200, {
+            "status": 200,
+            "error": None,
+            "data": {
+                "id": "daaab0f8-bbf1-1383-9167-b8825b1fab85",
+                "linkedin": body["linkedin"],
+                "data": [["+12015550100"]],
+            },
+        }
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    hit = client.find_mobile(
+        linkedin_url="https://www.linkedin.com/in/pat-lee",
+        domain="paragonhonda.com",
+    )
+    assert hit is not None
+    assert hit.phone == "+12015550100"
+    assert hit.source_tier == "aiark"
+
+
+def test_find_mobile_name_domain(monkeypatch) -> None:
+    client = AiArkClient(api_key="tok")
+
+    def fake_post(path, body):
+        assert path.endswith("/v2/people/mobile-phone-finder")
+        assert body["domain"] == "roofco.com"
+        assert body["name"] == "Jane Smith"
+        assert "linkedin" not in body
+        return 200, {"data": {"data": [["+19725550199", "+19725550000"]]}}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    hit = client.find_mobile("Jane", "Smith", "roofco.com")
+    assert hit is not None
+    assert hit.phone == "+19725550199"
+
+
+def test_find_mobile_miss_is_none(monkeypatch) -> None:
+    client = AiArkClient(api_key="tok")
+
+    def fake_post(path, body):
+        return 200, {"status": 404, "error": {"error": "data not found"}, "data": None}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    assert client.find_mobile("Jane", "Smith", "roofco.com") is None

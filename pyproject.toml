@@ -1,7 +1,7 @@
 [project]
 name = "email-waterfall"
-version = "1.0.0"
-description = "Standalone MCP service: DM / work-email enrichment waterfall"
+version = "1.2.0"
+description = "Standalone MCP service: DM / work-email / cellphone enrichment waterfall"
 requires-python = ">=3.11"
 readme = "README.md"
 

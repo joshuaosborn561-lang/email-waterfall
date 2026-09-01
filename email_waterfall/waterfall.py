@@ -7,6 +7,9 @@ AI Ark is third on BOTH lanes after the included Smartlead allotment is used:
   people/DM: People Search by domain
   email: LinkedIn URL / person id / name+domain / phone → export/single
 
+Also fills cellphone: AI Ark mobile-phone-finder (LinkedIn or name+domain),
+then LeadMagic mobile-finder, then Prospeo if max_tier allows.
+
 Writes to public.{client}_companies / public.{client}_contacts.
 """
 
@@ -23,14 +26,14 @@ from .clients import ClientConfig, get_client, parse_target_titles
 from .concurrency import company_concurrency
 from .people import looks_like_person, pick_best_person
 from .vendors.ai_ark import AiArkClient
-from .vendors.base import EmailHit, PersonHit, split_name
+from .vendors.base import EmailHit, PersonHit, PhoneHit, split_name
 from .vendors.fullenrich import FullEnrichClient
 from .vendors.getleads import GetLeadsClient
 from .vendors.leadmagic import LeadMagicClient
 from .vendors.prospeo import ProspeoClient
 from .vendors.smartlead import SmartleadClient
 
-Need = Literal["email", "dm", "both"]
+Need = Literal["email", "dm", "both", "phone"]
 MaxTier = Literal["getleads", "smartlead", "aiark", "leadmagic", "prospeo", "fullenrich"]
 
 TIER_ORDER: list[str] = [
@@ -42,7 +45,7 @@ TIER_ORDER: list[str] = [
     "fullenrich",
 ]
 TIER_RANK = {name: i for i, name in enumerate(TIER_ORDER)}
-DEFAULT_MAX_TIER: MaxTier = "fullenrich"
+DEFAULT_MAX_TIER: MaxTier = "leadmagic"
 
 
 def normalize_max_tier(max_tier: str | None) -> str:
@@ -58,6 +61,7 @@ def normalize_max_tier(max_tier: str | None) -> str:
         "smart-lead": "smartlead",
         "sl": "smartlead",
         "lead_magic": "leadmagic",
+        "lm": "leadmagic",
         "prospector": "prospeo",
         "apify": "getleads",  # Apify is not in this service; start at first paid tier
     }
@@ -107,6 +111,9 @@ def _norm_row(r: dict[str, Any]) -> dict[str, Any]:
     ).strip()
     if not first and full:
         first, last = split_name(full)
+    email = str(r.get("email") or "").strip().lower()
+    if not domain and email and "@" in email:
+        domain = _host_from(email.split("@", 1)[1])
     return {
         "domain": domain,
         "company_name": str(
@@ -118,7 +125,7 @@ def _norm_row(r: dict[str, Any]) -> dict[str, Any]:
         "title": str(
             r.get("title") or r.get("job_title") or r.get("owner_title") or ""
         ).strip(),
-        "email": str(r.get("email") or "").strip().lower(),
+        "email": email,
         "place_id": str(r.get("place_id") or "").strip(),
         "city": str(r.get("city") or r.get("address_city") or "").strip(),
         "state": str(r.get("state") or r.get("address_state") or "").strip(),
@@ -134,7 +141,7 @@ def _norm_row(r: dict[str, Any]) -> dict[str, Any]:
 
 
 def _empty_stats() -> dict[str, int]:
-    return {"calls": 0, "email_hits": 0, "dm_hits": 0}
+    return {"calls": 0, "email_hits": 0, "dm_hits": 0, "phone_hits": 0}
 
 
 class Waterfall:
@@ -172,6 +179,7 @@ class Waterfall:
         }
         self._vendor_dm_cache: dict[str, PersonHit | None] = {}
         self._email_cache: dict[tuple[str, ...], EmailHit | None] = {}
+        self._phone_cache: dict[tuple[str, ...], PhoneHit | None] = {}
         self._lock = threading.Lock()
 
     def _bump(self, tier: str, field: str) -> None:
@@ -390,6 +398,80 @@ class Waterfall:
             self._vendor_dm_cache[domain] = vendor_best
         return best
 
+    def resolve_phone(
+        self, row: dict[str, Any], *, email: str = ""
+    ) -> PhoneHit | None:
+        existing = (row.get("phone") or "").strip()
+        if existing:
+            return PhoneHit(phone=existing, source_tier="input")
+
+        linkedin = (row.get("linkedin_url") or "").strip()
+        work_email = (email or row.get("email") or "").strip().lower()
+        first = row.get("first_name") or ""
+        last = row.get("last_name") or ""
+        domain = row.get("domain") or ""
+        full = (row.get("full_name") or f"{first} {last}".strip()).strip()
+        can_aiark = bool(linkedin or (domain and full))
+        can_lm = bool(linkedin or work_email)
+        can_prospeo = bool(linkedin or (first and last and domain))
+        if not (can_aiark or can_lm or can_prospeo):
+            return None
+
+        cache_key = (
+            linkedin.lower(),
+            work_email,
+            domain.lower(),
+            first.lower(),
+            last.lower(),
+        )
+        with self._lock:
+            if cache_key in self._phone_cache:
+                return self._phone_cache[cache_key]
+
+        hit: PhoneHit | None = None
+        if can_aiark and self.ai_ark.enabled and self._allowed("aiark"):
+            self._bump("aiark", "calls")
+            hit = self.ai_ark.find_mobile(
+                first,
+                last,
+                domain,
+                row.get("company_name") or "",
+                linkedin_url=linkedin,
+                full_name=full,
+            )
+            if hit:
+                self._bump("aiark", "phone_hits")
+
+        if (
+            not hit
+            and can_lm
+            and self.leadmagic.enabled
+            and self._allowed("leadmagic")
+        ):
+            self._bump("leadmagic", "calls")
+            hit = self.leadmagic.find_mobile(
+                linkedin_url=linkedin, work_email=work_email
+            )
+            if hit:
+                self._bump("leadmagic", "phone_hits")
+
+        if not hit and can_prospeo and self.prospeo.enabled and self._allowed("prospeo"):
+            self._bump("prospeo", "calls")
+            hit = self.prospeo.find_mobile(
+                first,
+                last,
+                domain,
+                row.get("company_name") or "",
+                linkedin_url=linkedin,
+                full_name=full,
+            )
+            if hit:
+                self._bump("prospeo", "phone_hits")
+
+        with self._lock:
+            self._phone_cache[cache_key] = hit
+        return hit
+
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 
@@ -427,8 +509,14 @@ def _company_contact_rows(
         first = person.first_name or first
         last = person.last_name or last
         title = person.title or title
+    cellphone = (
+        item.get("phone")
+        or (person.phone if person else "")
+        or row.get("phone")
+        or ""
+    )
     contact: dict[str, Any] | None = None
-    if first or last or email:
+    if first or last or email or cellphone:
         contact = supabase_sync.contact_row(
             client_tag=client.tag,
             domain=row["domain"],
@@ -440,7 +528,7 @@ def _company_contact_rows(
             linkedin_url=(person.linkedin_url if person else "")
             or row.get("linkedin_url")
             or "",
-            cellphone=(person.phone if person else "") or row.get("phone") or "",
+            cellphone=cellphone,
             contact_city=row.get("city") or "",
             contact_state=row.get("state") or "",
             source_tool=email_tier or dm_tier or "waterfall",
@@ -462,8 +550,10 @@ def _enrich_one_row(
     email_tier = "input" if email else ""
     person: PersonHit | None = None
     dm_tier = ""
+    want_dm = need_norm in ("dm", "both", "phone")
+    want_email = need_norm in ("email", "both", "phone")
 
-    if need_norm in ("dm", "both"):
+    if want_dm:
         person = wf.resolve_dm(row)
         if person:
             dm_tier = person.source_tier
@@ -485,10 +575,18 @@ def _enrich_one_row(
                 email = person.email
                 email_tier = person.source_tier
 
-    if need_norm in ("email", "both") and not email:
+    if want_email and not email:
         hit = wf.resolve_email(row, include_fullenrich=include_fullenrich)
         if hit:
             email, email_tier = hit.email, hit.source_tier
+            extra_phone = getattr(hit, "phone", "") or ""
+            if extra_phone and not row.get("phone"):
+                row["phone"] = extra_phone
+
+    phone_hit = wf.resolve_phone(row, email=email)
+    phone = (phone_hit.phone if phone_hit else "") or row.get("phone") or ""
+    if phone and not row.get("phone"):
+        row["phone"] = phone
 
     return {
         "row": row,
@@ -496,6 +594,8 @@ def _enrich_one_row(
         "email_tier": email_tier,
         "dm_tier": dm_tier,
         "person": person,
+        "phone": phone,
+        "phone_tier": phone_hit.source_tier if phone_hit else "",
     }
 
 
@@ -525,6 +625,7 @@ def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]
             "attempts": int(stats.get("calls") or 0),
             "email_hits": int(stats.get("email_hits") or 0),
             "dm_hits": int(stats.get("dm_hits") or 0),
+            "phone_hits": int(stats.get("phone_hits") or 0),
             "vendor_calls": int(stats.get("vendor_calls") or 0),
             "vendor_hits": int(stats.get("vendor_hits") or 0),
             "allowed_by_max_tier": allowed,
@@ -552,6 +653,7 @@ def _result_payload(
     contacts_written: int,
     emails_found: int,
     dms_found: int,
+    phones_found: int,
     companies_done: int | None = None,
     companies_total: int | None = None,
 ) -> dict[str, Any]:
@@ -562,6 +664,7 @@ def _result_payload(
         "contacts_written": contacts_written,
         "emails_found": emails_found,
         "dms_found": dms_found,
+        "phones_found": phones_found,
         "tier_stats": dict(wf.tier_stats),
         "tier_breakdown": tier_breakdown,
         "need": need_norm,
@@ -605,7 +708,7 @@ def _enrich_waterfall_serial(
     for idx, row in enumerate(parsed):
         item = _enrich_one_row(wf, row, need_norm=need_norm, include_fullenrich=False)
         if (
-            need_norm in ("email", "both")
+            need_norm in ("email", "both", "phone")
             and not item["email"]
             and row["first_name"]
             and row["last_name"]
@@ -633,6 +736,13 @@ def _enrich_waterfall_serial(
                 wf._bump("fullenrich", "email_hits")
                 enriched[idx]["email"] = hit.email
                 enriched[idx]["email_tier"] = hit.source_tier
+                if not enriched[idx].get("phone"):
+                    phone_hit = wf.resolve_phone(enriched[idx]["row"], email=hit.email)
+                    if phone_hit:
+                        enriched[idx]["phone"] = phone_hit.phone
+                        enriched[idx]["phone_tier"] = phone_hit.source_tier
+                        if not enriched[idx]["row"].get("phone"):
+                            enriched[idx]["row"]["phone"] = phone_hit.phone
     elif pending_fe:
         wf.tier_stats["fullenrich"]["blocked_by_max_tier"] = len(pending_fe)
 
@@ -640,12 +750,15 @@ def _enrich_waterfall_serial(
     contacts_written = 0
     emails_found = 0
     dms_found = 0
+    phones_found = 0
 
     for n, item in enumerate(enriched, start=1):
         if item["email"]:
             emails_found += 1
         if item["dm_tier"]:
             dms_found += 1
+        if item.get("phone"):
+            phones_found += 1
         company, contact = _company_contact_rows(client, item)
         if write_supabase:
             companies_upserted += supabase_sync.upsert_companies(client, [company])
@@ -670,6 +783,7 @@ def _enrich_waterfall_serial(
                     contacts_written=contacts_written,
                     emails_found=emails_found,
                     dms_found=dms_found,
+                    phones_found=phones_found,
                     companies_done=n,
                     companies_total=len(parsed),
                 )
@@ -687,6 +801,7 @@ def _enrich_waterfall_serial(
         contacts_written=contacts_written,
         emails_found=emails_found,
         dms_found=dms_found,
+        phones_found=phones_found,
         companies_done=len(parsed),
         companies_total=len(parsed),
     )
@@ -712,6 +827,7 @@ def _enrich_waterfall_parallel(
         "contacts_written": 0,
         "emails_found": 0,
         "dms_found": 0,
+        "phones_found": 0,
     }
 
     def _report() -> None:
@@ -731,6 +847,7 @@ def _enrich_waterfall_parallel(
                     contacts_written=counters["contacts_written"],
                     emails_found=counters["emails_found"],
                     dms_found=counters["dms_found"],
+                    phones_found=counters["phones_found"],
                     companies_done=counters["companies_done"],
                     companies_total=total,
                 )
@@ -764,6 +881,8 @@ def _enrich_waterfall_parallel(
                 counters["emails_found"] += 1
             if item["dm_tier"]:
                 counters["dms_found"] += 1
+            if item.get("phone"):
+                counters["phones_found"] += 1
         _report()
         return item
 
@@ -785,6 +904,7 @@ def _enrich_waterfall_parallel(
         contacts_written=counters["contacts_written"],
         emails_found=counters["emails_found"],
         dms_found=counters["dms_found"],
+        phones_found=counters["phones_found"],
         companies_done=total,
         companies_total=total,
     )
@@ -806,8 +926,8 @@ def enrich_waterfall(
     client = get_client(client_tag)
     max_tier_n = normalize_max_tier(max_tier)
     need_norm = (need or "both").strip().lower()
-    if need_norm not in ("email", "dm", "both"):
-        raise ValueError("need must be 'email', 'dm', or 'both'")
+    if need_norm not in ("email", "dm", "both", "phone"):
+        raise ValueError("need must be 'email', 'dm', 'both', or 'phone'")
 
     if isinstance(target_titles, list):
         titles = [str(t).strip() for t in target_titles if str(t).strip()]
@@ -824,6 +944,7 @@ def enrich_waterfall(
             "contacts_written": 0,
             "emails_found": 0,
             "dms_found": 0,
+            "phones_found": 0,
             "companies_done": 0,
             "companies_total": 0,
             "tier_stats": {},

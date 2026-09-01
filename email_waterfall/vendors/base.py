@@ -31,6 +31,14 @@ class EmailHit:
     email: str
     source_tier: str
     status: str = ""
+    phone: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PhoneHit:
+    phone: str
+    source_tier: str
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -61,7 +69,9 @@ def person_from_row(row: dict[str, Any], source_tier: str) -> PersonHit | None:
         linkedin_url=str(
             row.get("linkedin_url") or row.get("linkedin") or row.get("profile_url") or ""
         ),
-        phone=str(row.get("phone") or row.get("mobile") or ""),
+        phone=str(
+            row.get("phone") or row.get("mobile") or row.get("cellphone") or ""
+        ).strip(),
         source_tier=source_tier,
         raw=row,
     )
