@@ -211,7 +211,7 @@ class AiArkClient:
     ) -> list[PersonHit]:
         if not self.enabled:
             return []
-        if not (domain or full_name or linkedin_url or phone):
+        if not (domain or full_name or linkedin_url or phone or company_name):
             return []
         contact: dict[str, Any] = {}
         if full_name:
@@ -249,6 +249,12 @@ class AiArkClient:
         }
         if domain:
             body["account"] = {"domain": {"any": {"include": [domain]}}}
+        elif company_name:
+            body["account"] = {
+                "name": {
+                    "any": {"include": {"mode": "SMART", "content": [company_name]}}
+                }
+            }
         if contact:
             body["contact"] = contact
         _status, data = self._post("/v1/people", body)
@@ -327,18 +333,19 @@ class AiArkClient:
             if hit:
                 return hit
 
+        company = (company_name or "").strip()
         if not (full or phone or linkedin_url):
             return None
-        if not (domain or linkedin_url or phone):
+        if not (domain or linkedin_url or phone or company):
             return None
 
         people = self.find_people(
             domain,
-            company_name=company_name,
+            company_name=company,
             limit=5,
             full_name=full,
             linkedin_url=linkedin_url,
-            phone=phone if not (full and domain) else "",
+            phone=phone if not (full and (domain or company)) else "",
         )
         for person in people:
             if person.email and "@" in person.email:

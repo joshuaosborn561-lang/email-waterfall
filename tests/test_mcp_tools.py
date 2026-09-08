@@ -29,3 +29,15 @@ def test_tool_names() -> None:
         "probe_maps",
     }
     assert banned.isdisjoint(set(names))
+
+
+def test_enrich_waterfall_has_source_and_estimate_only() -> None:
+    import inspect
+
+    from mcp_server.server import enrich_waterfall
+
+    params = inspect.signature(enrich_waterfall).parameters
+    assert "source" in params
+    assert "estimate_only" in params
+    assert "writeback" in params
+    assert params["rows"].default is None

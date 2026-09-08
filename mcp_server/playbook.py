@@ -26,9 +26,23 @@ Never omit `client_tag`. Never write to a shared contacts table.
 
 ## Default flow
 1. Optional: `ensure_client({ client_tag, profile, target_titles })` for a new client.
-2. Call `enrich_waterfall` with `rows`, `client_tag`, `need`, `max_tier`.
-3. If the tool returns `job_id`, poll `get_job_status` until completed/failed.
-4. Report counts only. Do not dump contact payloads.
+2. Prefer `source` (Supabase table) over inline `rows` so lead payloads stay
+   out of chat. If you must use `rows`, pass domain and/or name+company.
+3. For any paid source run, call `estimate_only=true` first.
+4. If the tool returns `job_id`, poll `get_job_status` until completed/failed.
+5. Report counts / cost only. Do not dump contact payloads.
+
+## Table source
+`source` is mutually exclusive with `rows`. The server pages 500 rows at a time
+and never returns payloads. Writeback (default on) patches `wf_status`,
+`wf_email`, `wf_email_status`, `wf_vendor`, `wf_updated_at` on the source table.
+
+## Name + company (no domain)
+Rows with first_name + last_name + company_name and no domain are tagged
+`mode=name_company`. They skip getleads and Smartlead and enter at AI Ark →
+LeadMagic → Prospeo → FullEnrich. `company_name` is sent to FullEnrich
+verbatim. When a tier returns an email, its domain is written back for later
+tiers.
 
 ## Tiers
 getleads → Smartlead (included plan email finder) → AI Ark → LeadMagic →
@@ -50,7 +64,7 @@ Cellphones also fall through to LeadMagic mobile-finder (and Prospeo if
 max_tier allows). Input `phone` / `cellphone` / `mobile` is written as cellphone.
 
 ## Input row shape
-domain (required, or derived from email), company_name, first_name, last_name,
+domain (optional if name+company present), company_name, first_name, last_name,
 title, email, linkedin_url, phone / cellphone / mobile, place_id, city, state.
 """
 

@@ -23,7 +23,7 @@ mcp = MCPServer(
         "Not a Maps scraper or website crawler."
     ),
     instructions=INSTRUCTIONS,
-    version="1.2.0",
+    version="1.3.0",
 )
 
 
@@ -274,32 +274,42 @@ def list_background_jobs(limit: int = 20) -> str:
     )
 )
 def enrich_waterfall(
-    rows: Any,
-    client_tag: str,
+    rows: Any = None,
+    client_tag: str = "",
     need: str = "both",
     max_tier: str = "leadmagic",
     target_titles: str = "",
     require_title_match: bool = True,
     background: bool = True,
+    source: Any = None,
+    estimate_only: bool = False,
+    writeback: bool = True,
 ) -> str:
     """Resolve DMs + work emails + cellphones via paid vendors; write public.{client}_*.
 
-    `rows` = JSON list of {domain, company_name?, first_name?, last_name?, title?,
+    Pass either `rows` or `source`, never both. Response is counts / job_id / cost
+    only — never row payloads.
+
+    `rows` = JSON list of {domain?, company_name?, first_name?, last_name?, title?,
     email?, linkedin_url?, phone?, cellphone?, mobile?, place_id?, city?, state?}.
-    Domain is required (or derived from email). Phone / cellphone / mobile are
-    accepted as input and written back as cellphone.
+    Domain OR (first_name + last_name + company_name) is required. Name+company
+    rows skip getleads/Smartlead and enter at AI Ark → LeadMagic → Prospeo →
+    FullEnrich. company_name is passed to FullEnrich verbatim.
+
+    `source` = {project_id, schema?, table, where?, key_column?, map?, limit?,
+    cursor?} to read rows server-side from Supabase in pages of 500. Optional
+    writeback (default true) patches wf_status / wf_email / wf_email_status /
+    wf_vendor / wf_updated_at on the source table.
+
+    `estimate_only` = true returns row counts per mode, tiers each mode will
+    touch, and a per-vendor credit estimate. Zero spend. Required before paid
+    source runs.
 
     client_tag is required (any snake_case). Unknown tags auto-ensure write tables
     as public.{tag}_wf_companies / _wf_contacts. Never omit it.
     need = 'dm' | 'email' | 'both' | 'phone'.
     max_tier = 'getleads' | 'smartlead' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
     (default 'leadmagic' / alias 'lm' — stops before Prospeo and FullEnrich).
-
-    target_titles = comma-separated ranked titles. Empty uses the client default.
-    require_title_match = drop people whose title is not in the ranked list
-    (basco GM / Dealer Principal remains a last-resort fallback).
-
-    Response is counts only. Long runs return job_id — poll get_job_status.
     """
     _ensure_repo_cwd()
     _reload_settings()
@@ -322,8 +332,11 @@ def enrich_waterfall(
             max_tier=max_tier_n,
             target_titles=target_titles,
             require_title_match=bool(require_title_match),
-            write_supabase=True,
+            write_supabase=not estimate_only,
             progress_callback=progress_callback,
+            source=source,
+            estimate_only=bool(estimate_only),
+            writeback=bool(writeback) and not estimate_only,
         )
 
     def _run(job: Any) -> dict[str, Any]:
@@ -334,7 +347,14 @@ def enrich_waterfall(
 
         return _run_enrich(progress_callback=on_progress)
 
-    rows_chars = len(rows) if isinstance(rows, str) else len(json.dumps(rows, default=str))
+    if estimate_only:
+        return _json(_run_enrich())
+    if source not in (None, "", {}):
+        rows_chars = 50_000
+    else:
+        rows_chars = (
+            len(rows) if isinstance(rows, str) else len(json.dumps(rows, default=str))
+        )
     if background and (_http_mode() or rows_chars > 2000):
         from mcp_server.jobs import start_job
 
@@ -346,6 +366,9 @@ def enrich_waterfall(
                 "max_tier": max_tier_n,
                 "client_tag": client.tag,
                 "rows_chars": rows_chars,
+                "source_table": (source or {}).get("table")
+                if isinstance(source, dict)
+                else None,
             },
         )
         return _json(

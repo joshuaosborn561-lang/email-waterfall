@@ -24,7 +24,11 @@ def _vendor(*, enabled: bool = True, people=None, email=None):
 
 def _patch_clients(monkeypatch, *, gl, ark, lm, fe, prospeo=None, smartlead=None) -> None:
     monkeypatch.setattr(waterfall, "GetLeadsClient", lambda: gl)
-    monkeypatch.setattr(waterfall, "SmartleadClient", lambda: smartlead or _vendor(enabled=False))
+    monkeypatch.setattr(
+        waterfall,
+        "SmartleadClient",
+        lambda *args, **kwargs: smartlead or _vendor(enabled=False),
+    )
     monkeypatch.setattr(waterfall, "AiArkClient", lambda: ark)
     monkeypatch.setattr(waterfall, "LeadMagicClient", lambda: lm)
     monkeypatch.setattr(waterfall, "ProspeoClient", lambda: prospeo or _vendor(enabled=False))

@@ -38,35 +38,40 @@ LeadMagic mobile-finder runs after AI Ark when a LinkedIn URL or work email is a
 
 `max_tier` default is `leadmagic` (alias `lm`). Raise it to `prospeo` / `fullenrich` (alias `fe`) if you want later paid email tiers.
 
+## Name + company (no domain)
+
+Rows with `first_name` + `last_name` + `company_name` and no domain are tagged `mode=name_company`. They skip getleads and Smartlead and enter at AI Ark → LeadMagic → Prospeo → FullEnrich. `company_name` is sent to FullEnrich verbatim (never replaced with a domain string). When a tier returns an email, its domain is written onto the row for later tiers.
+
 ## MCP tool: `enrich_waterfall`
+
+Pass **either** `rows` **or** `source`, never both. Prefer `source` so lead payloads stay out of chat.
 
 ```json
 {
-  "rows": [
-    {
-      "domain": "paragonhonda.com",
-      "company_name": "Paragon Honda",
-      "first_name": "",
-      "last_name": "",
-      "title": "",
-      "email": "",
-      "linkedin_url": "",
-      "phone": "",
-      "place_id": "",
-      "city": "",
-      "state": ""
+  "source": {
+    "project_id": "kemvxzhcxvynmoutwdrh",
+    "schema": "public",
+    "table": "ew_names_ready",
+    "where": "wf_status is null",
+    "key_column": "id",
+    "map": {
+      "first_name": "first_name",
+      "last_name": "last_name",
+      "company_name": "company_name"
     }
-  ],
-  "need": "both",
-  "client_tag": "basco",
-  "max_tier": "leadmagic",
-  "target_titles": "Service Director, Fixed Operations Director, Service Manager, Warranty Manager, General Manager, Dealer Principal, GM",
-  "require_title_match": true,
-  "background": true
+  },
+  "need": "email",
+  "client_tag": "peterson_earthworks",
+  "max_tier": "fullenrich",
+  "estimate_only": true
 }
 ```
 
-Response is **counts only**. Long HTTP runs return `job_id` — poll `get_job_status`.
+`source` is read server-side with the service role, paged 500 rows at a time. Results still write `public.{client_tag}_wf_contacts`. When writeback columns exist on the source table (or `writeback=true` adds them), the run also patches `wf_status`, `wf_email`, `wf_email_status`, `wf_vendor`, `wf_updated_at`.
+
+`estimate_only=true` returns row counts per mode, the tiers each mode will touch, and a per-vendor credit estimate. Zero spend. Required before any paid source run.
+
+Inline `rows` still works as before (domain and/or name+company). Response is **counts / job_id / cost only** — never row payloads. Long HTTP runs return `job_id` — poll `get_job_status`.
 
 Other tools: `health`, `ensure_client`, `list_clients`, `describe_client`, `get_job_status`, `list_background_jobs`.
 
