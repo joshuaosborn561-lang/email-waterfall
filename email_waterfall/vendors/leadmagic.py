@@ -6,6 +6,7 @@ from typing import Any
 
 from email_waterfall import http_client
 from email_waterfall.config import settings
+from email_waterfall.need import CAP_EMAIL, CAP_PEOPLE, CAP_PHONE, assert_capability
 
 from .base import EmailHit, PersonHit, PhoneHit, person_from_row
 
@@ -61,6 +62,9 @@ class LeadMagicClient:
         company = (company_name or "").strip()
         if not first or not last or not (domain or company):
             return None
+        assert_capability(
+            CAP_EMAIL, vendor=self.tier, endpoint="POST /v1/people/email-finder"
+        )
         body: dict[str, Any] = {
             "first_name": first,
             "last_name": last,
@@ -97,6 +101,9 @@ class LeadMagicClient:
         """Role-finder per ranked title, then employee-finder as a broader net."""
         if not self.enabled or not domain:
             return []
+        assert_capability(
+            CAP_PEOPLE, vendor=self.tier, endpoint="POST /v1/people/role-finder"
+        )
         found: list[PersonHit] = []
         seen: set[tuple[str, str]] = set()
 
@@ -181,6 +188,9 @@ class LeadMagicClient:
             body["personal_email"] = personal
         if not body:
             return None
+        assert_capability(
+            CAP_PHONE, vendor=self.tier, endpoint="POST /v1/people/mobile-finder"
+        )
         data = self._post("/v1/people/mobile-finder", body)
         if data is None:
             data = self._post("/mobile-finder", body)

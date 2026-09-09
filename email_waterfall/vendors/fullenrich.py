@@ -7,6 +7,7 @@ from typing import Any
 
 from email_waterfall import http_client
 from email_waterfall.config import settings
+from email_waterfall.need import CAP_EMAIL, assert_capability
 
 from .base import EmailHit
 
@@ -68,6 +69,9 @@ class FullEnrichClient:
         if not self.enabled or not rows:
             return [None] * len(rows)
 
+        assert_capability(
+            CAP_EMAIL, vendor=self.tier, endpoint="POST /contact/enrich/bulk"
+        )
         data = []
         for i, row in enumerate(rows[:100]):
             first = (row.get("first_name") or "").strip()

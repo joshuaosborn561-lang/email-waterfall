@@ -6,6 +6,7 @@ from typing import Any
 
 from email_waterfall import http_client
 from email_waterfall.config import settings
+from email_waterfall.need import CAP_EMAIL, CAP_PEOPLE, assert_capability
 
 from .base import EmailHit, PersonHit, person_from_row
 
@@ -66,6 +67,9 @@ class GetLeadsClient:
     def find_email(
         self, first_name: str, last_name: str, domain: str, company_name: str = ""
     ) -> EmailHit | None:
+        assert_capability(
+            CAP_EMAIL, vendor=self.tier, endpoint=self.find_email_path
+        )
         data = self._post(
             self.find_email_path,
             {
@@ -111,6 +115,7 @@ class GetLeadsClient:
         if titles:
             body["titles"] = titles
             body["job_title"] = titles[0]
+        assert_capability(CAP_PEOPLE, vendor=self.tier, endpoint=self.people_path)
         data = self._post(self.people_path, body)
         if not data:
             return []

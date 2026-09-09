@@ -57,7 +57,13 @@ def test_estimate_only_name_company_no_spend(monkeypatch) -> None:
     assert "getleads" not in out["estimate"]
     assert "smartlead" not in out["estimate"]
     assert out["estimate"]["aiark"]["rows"] == 956
-    assert out["estimate"]["aiark"]["credits_est"] == 1434.0
+    assert out["estimate"]["aiark"]["credits_per_row"] == 1.0
+    assert out["estimate"]["aiark"]["credits_est"] == 956.0
+    assert out["estimate"]["aiark"]["rate_note"] == "email-only"
+    assert out["need_capabilities"] == ["email"]
+    assert out["suppressed_by_need"]["aiark_phone"] == 956
+    assert out["suppressed_by_need"]["leadmagic_phone"] == 956
+    assert out["suppressed_by_need"]["prospeo_phone"] == 956
     assert out["estimate"]["leadmagic"]["credits_est"] == 956.0
     assert out["estimate"]["prospeo"]["credits_est"] == 956.0
     assert out["estimate"]["fullenrich"]["credits_est"] == 956.0
@@ -110,6 +116,31 @@ def test_estimate_only_source_does_not_call_vendors(monkeypatch) -> None:
     assert out["modes"]["name_company"] == 956
     assert out["spend"] == 0
     sl.find_email.assert_not_called()
+    assert out["suppressed_by_need"]["aiark_phone"] == 956
+
+
+def test_estimate_only_both_quotes_aiark_email_plus_phone(monkeypatch) -> None:
+    _mute_smartlead(monkeypatch)
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+                "company_name": "Roof Co",
+            }
+        ],
+        client_tag="peterson",
+        need="both",
+        max_tier="leadmagic",
+        estimate_only=True,
+        write_supabase=False,
+    )
+    assert out["estimate"]["aiark"]["credits_per_row"] == 1.5
+    assert out["estimate"]["aiark"]["credits_est"] == 1.5
+    assert out["estimate"]["aiark"]["rate_note"] == "email+phone"
+    assert out["need_capabilities"] == ["email", "people", "phone"]
+    assert out["suppressed_by_need"] == {}
 
 
 def test_estimate_only_domain_rows_include_early_tiers(monkeypatch) -> None:

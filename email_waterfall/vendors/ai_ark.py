@@ -17,6 +17,7 @@ from typing import Any
 
 from email_waterfall import http_client
 from email_waterfall.config import settings
+from email_waterfall.need import CAP_EMAIL, CAP_PEOPLE, CAP_PHONE, assert_capability
 
 from .base import EmailHit, PersonHit, PhoneHit, split_name
 
@@ -208,11 +209,15 @@ class AiArkClient:
         full_name: str = "",
         linkedin_url: str = "",
         phone: str = "",
+        capability: str = CAP_PEOPLE,
     ) -> list[PersonHit]:
         if not self.enabled:
             return []
         if not (domain or full_name or linkedin_url or phone or company_name):
             return []
+        assert_capability(
+            capability, vendor=self.tier, endpoint="POST /v1/people"
+        )
         contact: dict[str, Any] = {}
         if full_name:
             contact["fullName"] = {
@@ -285,6 +290,9 @@ class AiArkClient:
             body["url"] = linkedin_url
         if not body:
             return None
+        assert_capability(
+            CAP_EMAIL, vendor=self.tier, endpoint="POST /v2/people/export/single"
+        )
         status, data = self._post("/v2/people/export/single", body)
         if status in (0, 400, 401, 402, 429) or status >= 500:
             return None
@@ -346,6 +354,7 @@ class AiArkClient:
             full_name=full,
             linkedin_url=linkedin_url,
             phone=phone if not (full and (domain or company)) else "",
+            capability=CAP_EMAIL,
         )
         for person in people:
             if person.email and "@" in person.email:
@@ -389,6 +398,11 @@ class AiArkClient:
             body["name"] = full
         else:
             return None
+        assert_capability(
+            CAP_PHONE,
+            vendor=self.tier,
+            endpoint="POST /v2/people/mobile-phone-finder",
+        )
         status, data = self._post("/v2/people/mobile-phone-finder", body)
         if status in (0, 400, 401, 402, 429) or status >= 500:
             return None

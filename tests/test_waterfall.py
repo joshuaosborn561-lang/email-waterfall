@@ -756,7 +756,7 @@ def test_leadmagic_mobile_after_aiark_miss(monkeypatch) -> None:
             }
         ],
         client_tag="peterson",
-        need="email",
+        need="both",
         write_supabase=True,
     )
     assert out["phones_found"] == 1
@@ -765,7 +765,7 @@ def test_leadmagic_mobile_after_aiark_miss(monkeypatch) -> None:
     lm.find_mobile.assert_called()
 
 
-def test_need_phone_resolves_dm_email_and_mobile(monkeypatch) -> None:
+def test_need_phone_resolves_dm_and_mobile_not_email(monkeypatch) -> None:
     sink: dict = {}
     gl = _vendor(
         people=[
@@ -799,9 +799,11 @@ def test_need_phone_resolves_dm_email_and_mobile(monkeypatch) -> None:
     )
     assert out["need"] == "phone"
     assert out["dms_found"] == 1
-    assert out["emails_found"] == 1
+    assert out["emails_found"] == 0
     assert out["phones_found"] == 1
     assert sink["contacts"][0]["cellphone"] == "+19725550111"
+    ark.find_email.assert_not_called()
+    ark.find_mobile.assert_called()
 
 
 def test_empty_rows() -> None:
