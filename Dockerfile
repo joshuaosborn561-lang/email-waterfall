@@ -13,7 +13,7 @@ COPY email_waterfall ./email_waterfall
 COPY mcp_server ./mcp_server
 COPY .env.example .
 
-RUN mkdir -p data/jobs
+RUN mkdir -p data/jobs data/locks
 
 ENV MCP_TRANSPORT=streamable-http
 ENV HOST=0.0.0.0

@@ -21,6 +21,13 @@ WRITEBACK_COLUMNS = (
     "wf_vendor",
     "wf_updated_at",
 )
+QUEUE_WRITE_COLUMNS = (
+    "dl_status",
+    "candidate_email",
+    "dl_provider",
+    "dl_pattern",
+)
+ALL_WRITEBACK_COLUMNS = WRITEBACK_COLUMNS + QUEUE_WRITE_COLUMNS
 REQUIRED_MAP_FIELDS = ("first_name", "last_name", "company_name")
 OPTIONAL_MAP_FIELDS = (
     "domain",
@@ -475,36 +482,52 @@ def existing_columns(src: TableSource) -> set[str]:
         return src._present_writeback
     probed = list_table_columns(src)
     if probed is not None:
-        src._present_writeback = {c for c in WRITEBACK_COLUMNS if c in probed}
+        src._present_writeback = {c for c in ALL_WRITEBACK_COLUMNS if c in probed}
         return src._present_writeback
     url, key = resolve_credentials(src.project_id)
     try:
         supabase_sync.request_on(
             "GET",
-            f"{src.table}?select={','.join(WRITEBACK_COLUMNS)}&limit=0",
+            f"{src.table}?select={','.join(ALL_WRITEBACK_COLUMNS)}&limit=0",
             url=url,
             key=key,
             extra_headers=_profile_headers(src.schema),
         )
-        src._present_writeback = set(WRITEBACK_COLUMNS)
+        src._present_writeback = set(ALL_WRITEBACK_COLUMNS)
         return src._present_writeback
     except RuntimeError as exc:
         missing = set()
         detail = str(exc).lower()
-        for col in WRITEBACK_COLUMNS:
+        for col in ALL_WRITEBACK_COLUMNS:
             if col.lower() in detail:
                 missing.add(col)
-        present = set(WRITEBACK_COLUMNS) - missing if missing else set()
+        present = set(ALL_WRITEBACK_COLUMNS) - missing if missing else set()
         src._present_writeback = present
         return present
 
 
 def ensure_writeback_columns(src: TableSource) -> list[str]:
-    """Add wf_* columns when writeback=true and they are missing."""
+    """Add wf_* columns when writeback=true and they are missing.
+
+    Native queue columns (dl_status, candidate_email, …) are never created
+    here — they already exist on email_resolution. If those are present,
+    writeback can proceed even when wf_* cannot be added.
+    """
     present = existing_columns(src)
     needed = [c for c in WRITEBACK_COLUMNS if c not in present]
     if not needed:
         return []
+    has_queue = any(col in present for col in ("dl_status", "candidate_email"))
+    try:
+        added = _add_wf_columns(src, needed)
+        return added
+    except RuntimeError:
+        if has_queue:
+            return []
+        raise
+
+
+def _add_wf_columns(src: TableSource, needed: list[str]) -> list[str]:
     url, key = resolve_credentials(src.project_id)
     stmts = []
     for col in needed:
@@ -526,7 +549,7 @@ def ensure_writeback_columns(src: TableSource) -> list[str]:
             },
             prefer="return=representation",
         )
-        src._present_writeback = set(WRITEBACK_COLUMNS)
+        src._present_writeback = (src._present_writeback or set()) | set(WRITEBACK_COLUMNS)
         return needed
     except RuntimeError:
         pass
@@ -539,7 +562,7 @@ def ensure_writeback_columns(src: TableSource) -> list[str]:
             body={"sql": sql, "query": sql},
             prefer="return=representation",
         )
-        src._present_writeback = set(WRITEBACK_COLUMNS)
+        src._present_writeback = (src._present_writeback or set()) | set(WRITEBACK_COLUMNS)
         return needed
     except RuntimeError as exc:
         raise RuntimeError(
@@ -560,12 +583,18 @@ def writeback_result(
     if key in (None, "") or not src.writeback:
         return
     url, key_auth = resolve_credentials(src.project_id)
+    email_n = (email or "").strip().lower() or None
+    vendor_n = vendor or None
+    status_n = status or None
     body = {
-        "wf_status": status or None,
-        "wf_email": (email or "").strip().lower() or None,
+        "wf_status": status_n,
+        "wf_email": email_n,
         "wf_email_status": email_status or None,
-        "wf_vendor": vendor or None,
+        "wf_vendor": vendor_n,
         "wf_updated_at": datetime.now(timezone.utc).isoformat(),
+        "dl_status": status_n,
+        "candidate_email": email_n,
+        "dl_provider": vendor_n,
     }
     present = existing_columns(src)
     body = {k: v for k, v in body.items() if k in present}

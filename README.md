@@ -53,7 +53,7 @@ Peterson queue:
 ```json
 {
   "source_table": "client_peterson.email_resolution",
-  "where": "candidate_email is null",
+  "where": "dl_status is null",
   "client_tag": "peterson",
   "need": "email",
   "max_tier": "leadmagic",
@@ -84,7 +84,9 @@ Richer `source` object still works:
 }
 ```
 
-`source` is read server-side with the service role, paged 500 rows at a time. Results still write `public.{client_tag}_wf_contacts`. When writeback columns exist on the source table (or `writeback=true` adds them), the run also patches `wf_status`, `wf_email`, `wf_email_status`, `wf_vendor`, `wf_updated_at`.
+`source` is read server-side with the service role, paged 500 rows at a time. Results still write `public.{client_tag}_wf_contacts`. Writeback patches the queue per row: `dl_status` / `candidate_email` / `dl_provider` when those columns exist (Peterson `email_resolution`), plus `wf_*` when present. Resume with `where: "dl_status is null"`.
+
+Smartlead 429 / rate-limit backs off and retries. It does not set `credits_exhausted` while used is still below total. Finder calls share one process-wide semaphore (default `SMARTLEAD_CONCURRENCY=3`), including across background jobs.
 
 `estimate_only=true` returns row counts per mode, the tiers each mode will touch, and a per-vendor credit estimate. Zero spend. Required before any paid source run.
 

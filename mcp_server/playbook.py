@@ -39,13 +39,14 @@ Maps-scraper style params, mutually exclusive with `rows`:
 
 ```
 source_table: "client_peterson.email_resolution"
-where: "candidate_email is null"
+where: "dl_status is null"
 ```
 
 `source_table` accepts `schema.table`. The server pages 500 rows via a
 security-definer RPC when the schema is not `public` (PostgREST only exposes
-public). Never returns payloads. Writeback (default on) patches `wf_status`,
-`wf_email`, `wf_email_status`, `wf_vendor`, `wf_updated_at` on the source table.
+public). Never returns payloads. Writeback (default on) patches `dl_status`,
+`candidate_email`, `dl_provider` on the queue (and `wf_*` when those columns
+exist) so a row is marked after it is processed. Resume with `dl_status is null`.
 Omitted `map` auto-picks `owner_title` → title and `candidate_email` → email.
 
 ## Name + company (no domain)
@@ -63,7 +64,10 @@ run unless you raise max_tier.
 
 Smartlead uses the monthly finder allotment on the Smartlead plan. Credits are
 checked via search-analytics; once they are spent the cascade falls through to
-the paid tiers. It is name+domain email only — not a DM people search.
+the paid tiers. A 429 / rate-limit is a backoff+retry, not exhaustion — do not
+flip the tier off while `credits_used` is still far below `credits_total`.
+Smartlead concurrency is a process-wide (and cross-worker) semaphore, default 3.
+It is name+domain email only — not a DM people search.
 
 AI Ark is fully used on all three lanes (not people-only):
 - people/DM: People Search by domain + ranked titles
