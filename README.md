@@ -38,6 +38,17 @@ LeadMagic mobile-finder runs after AI Ark when a LinkedIn URL or work email is a
 
 `max_tier` default is `leadmagic` (alias `lm`). Raise it to `prospeo` / `fullenrich` (alias `fe`) if you want later paid email tiers.
 
+`need` gates **vendor calls**, not just output. It is independent of `max_tier`:
+
+| `need` | May call | Must not call |
+|---|---|---|
+| `email` | email finders only | any phone/mobile endpoint |
+| `phone` | phone finders (+ people search) | any email finder |
+| `dm` | people-discovery only | phone and email finders |
+| `both` | email + phone + people | — |
+
+`need='email'` never calls AI Ark `mobile-phone-finder` or LeadMagic `mobile-finder`. Job results include `suppressed_by_need` (eligible phone lookups not issued). `estimate_only` quotes AI Ark at **1.0 credit/row** for email-only (1.5 is the email+phone bundle). One row is one attempt per tier; AI Ark search-then-export is 1 attempt and 2 `vendor_calls`.
+
 ## Name + company (no domain)
 
 Rows with `first_name` + `last_name` + `company_name` and no domain are tagged `mode=name_company`. They skip getleads and Smartlead and enter at AI Ark → LeadMagic → Prospeo → FullEnrich. `company_name` is sent to FullEnrich verbatim (never replaced with a domain string). When a tier returns an email, its domain is written onto the row for later tiers.
@@ -88,7 +99,7 @@ Richer `source` object still works:
 
 Smartlead 429 / rate-limit backs off and retries. It does not set `credits_exhausted` while used is still below total. Finder calls share one process-wide semaphore (default `SMARTLEAD_CONCURRENCY=3`), including across background jobs.
 
-`estimate_only=true` returns row counts per mode, the tiers each mode will touch, and a per-vendor credit estimate. Zero spend. Required before any paid source run.
+`estimate_only=true` returns row counts per mode, the tiers each mode will touch, and a per-vendor credit estimate that respects `need` (email-only AI Ark rate, plus `suppressed_by_need`). Zero spend. Required before any paid source run.
 
 Inline `rows` still works as before (domain and/or name+company). Response is **counts / job_id / cost only** — never row payloads. Long HTTP runs return `job_id` — poll `get_job_status`.
 

@@ -23,7 +23,7 @@ mcp = MCPServer(
         "Not a Maps scraper or website crawler."
     ),
     instructions=INSTRUCTIONS,
-    version="1.3.1",
+    version="1.3.2",
 )
 
 
@@ -315,7 +315,10 @@ def enrich_waterfall(
     client_tag is required (any snake_case). enrich_waterfall always calls
     ensure_client first — including builtin peterson/basco — so write tables
     exist before the first upsert. Never omit client_tag.
-    need = 'dm' | 'email' | 'both' | 'phone'.
+    need = 'dm' | 'email' | 'both' | 'phone'. Gates vendor *calls*, not just
+    output. need='email' never hits phone/mobile endpoints (AI Ark
+    mobile-phone-finder, LeadMagic mobile-finder, Prospeo enrich_mobile).
+    need='phone' never hits email finders. max_tier caps depth independently.
     max_tier = 'getleads' | 'smartlead' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
     (default 'leadmagic' / alias 'lm' — stops before Prospeo and FullEnrich).
     """

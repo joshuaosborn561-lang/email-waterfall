@@ -78,6 +78,21 @@ AI Ark is fully used on all three lanes (not people-only):
 Cellphones also fall through to LeadMagic mobile-finder (and Prospeo if
 max_tier allows). Input `phone` / `cellphone` / `mobile` is written as cellphone.
 
+`need` is an allowlist of what may be *requested from vendors*, applied before
+any HTTP call. It is independent of `max_tier` (depth).
+
+| need | May call | Must not call |
+|---|---|---|
+| email | email finders only | any phone/mobile endpoint |
+| phone | phone finders (+ people search for LinkedIn) | any email finder |
+| dm | people-discovery only | phone and email finders |
+| both | email + phone + people | — |
+
+need='email' skips AI Ark mobile-phone-finder and LeadMagic mobile-finder
+entirely — do not call and discard. Job results include `suppressed_by_need`
+counts and `estimate_only` quotes the email-only AI Ark rate (1.0, not 1.5).
+AI Ark People Search then export/single is one attempt and two vendor_calls.
+
 ## Input row shape
 domain (optional if name+company present), company_name, first_name, last_name,
 title, email, linkedin_url, phone / cellphone / mobile, place_id, city, state.

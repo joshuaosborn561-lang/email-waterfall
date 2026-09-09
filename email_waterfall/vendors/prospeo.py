@@ -11,6 +11,7 @@ from typing import Any
 
 from email_waterfall import http_client
 from email_waterfall.config import settings
+from email_waterfall.need import CAP_EMAIL, CAP_PHONE, assert_capability
 
 from .base import EmailHit, PhoneHit
 
@@ -75,6 +76,9 @@ class ProspeoClient:
         if not has_linkedin and not has_name_company:
             return None
 
+        assert_capability(
+            CAP_EMAIL, vendor=self.tier, endpoint="POST /enrich-person"
+        )
         self.calls += 1
         r = http_client.post(
             self.tier,
@@ -155,6 +159,9 @@ class ProspeoClient:
         if not has_linkedin and not has_name_company:
             return None
 
+        assert_capability(
+            CAP_PHONE, vendor=self.tier, endpoint="POST /enrich-person enrich_mobile"
+        )
         self.calls += 1
         r = http_client.post(
             self.tier,

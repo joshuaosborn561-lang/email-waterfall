@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 
 from email_waterfall import http_client
 from email_waterfall.config import settings
+from email_waterfall.need import CAP_EMAIL, assert_capability
 
 from .base import EmailHit
 
@@ -250,6 +251,9 @@ class SmartleadClient:
         if not self.has_credits():
             return None
 
+        assert_capability(
+            CAP_EMAIL, vendor=self.tier, endpoint="POST /search-contacts/find-emails"
+        )
         self.calls += 1
         body: Any = None
         r = None
