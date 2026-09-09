@@ -30,6 +30,50 @@ _INVALID_VERIFY = {
     "catch_all",
     "unknown",
 }
+_THROTTLE_MARKERS = (
+    "rate limit",
+    "rate-limit",
+    "ratelimit",
+    "too many",
+    "throttl",
+    "retry later",
+    "retry-after",
+    "slow down",
+)
+_CREDIT_ZERO_MARKERS = (
+    "insufficient credit",
+    "no credit",
+    "out of credit",
+    "credits exhausted",
+    "credit exhausted",
+    "allotment exceeded",
+    "payment required",
+    "no remaining credit",
+)
+
+
+class _SharedCredits:
+    """One allotment snapshot for every SmartleadClient in this process."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.available: int | None = None
+        self.total: int | None = None
+        self.used: int | None = None
+        self.exhausted = False
+        self.checked_at = 0.0
+
+
+_CREDITS = _SharedCredits()
+
+
+def reset_shared_credits() -> None:
+    with _CREDITS.lock:
+        _CREDITS.available = None
+        _CREDITS.total = None
+        _CREDITS.used = None
+        _CREDITS.exhausted = False
+        _CREDITS.checked_at = 0.0
 
 
 class SmartleadClient:
@@ -48,28 +92,22 @@ class SmartleadClient:
         self.timeout = timeout
         self.calls = 0
         self.hits = 0
-        self._lock = threading.Lock()
-        self._credits_available: int | None = None
-        self._credits_total: int | None = None
-        self._credits_used: int | None = None
-        self._checked_at = 0.0
-        self._exhausted = False
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key) and not self._exhausted
+        return bool(self.api_key) and not _CREDITS.exhausted
 
     def _url(self, path: str) -> str:
         qs = urlencode({"api_key": self.api_key})
         return f"{self.base_url}{path}?{qs}"
 
     def credit_snapshot(self) -> dict[str, Any]:
-        with self._lock:
+        with _CREDITS.lock:
             return {
-                "available": self._credits_available,
-                "total": self._credits_total,
-                "used": self._credits_used,
-                "exhausted": self._exhausted,
+                "available": _CREDITS.available,
+                "total": _CREDITS.total,
+                "used": _CREDITS.used,
+                "exhausted": _CREDITS.exhausted,
             }
 
     def refresh_credits(self, *, force: bool = False, ttl: float = 30.0) -> int | None:
@@ -77,25 +115,30 @@ class SmartleadClient:
         if not self.api_key:
             return None
         now = time.monotonic()
-        with self._lock:
+        with _CREDITS.lock:
             if (
                 not force
-                and self._credits_available is not None
-                and (now - self._checked_at) < ttl
+                and _CREDITS.available is not None
+                and (now - _CREDITS.checked_at) < ttl
             ):
-                return self._credits_available
+                return _CREDITS.available
         r = http_client.get(
             self.tier,
             self._url(ANALYTICS_PATH),
             headers={"Accept": "application/json"},
             timeout=self.timeout,
         )
-        if r is None or r.status_code >= 400:
-            return self._credits_available
+        if r is None or r.status_code == 429 or r.status_code >= 500:
+            with _CREDITS.lock:
+                return _CREDITS.available
+        if r.status_code >= 400:
+            with _CREDITS.lock:
+                return _CREDITS.available
         try:
             payload = r.json()
         except ValueError:
-            return self._credits_available
+            with _CREDITS.lock:
+                return _CREDITS.available
         data = payload.get("data") if isinstance(payload, dict) else None
         block = {}
         if isinstance(data, dict):
@@ -111,21 +154,21 @@ class SmartleadClient:
         )
         total = _as_int(block.get("total"))
         used = _as_int(block.get("used"))
-        with self._lock:
+        with _CREDITS.lock:
             if available is not None:
-                self._credits_available = available
-                self._exhausted = available <= 0
+                _CREDITS.available = available
+                _CREDITS.exhausted = available <= 0
             if total is not None:
-                self._credits_total = total
+                _CREDITS.total = total
             if used is not None:
-                self._credits_used = used
-            self._checked_at = time.monotonic()
-            return self._credits_available
+                _CREDITS.used = used
+            _CREDITS.checked_at = time.monotonic()
+            return _CREDITS.available
 
     def has_credits(self) -> bool:
         if not self.api_key:
             return False
-        if self._exhausted:
+        if _CREDITS.exhausted:
             return False
         available = self.refresh_credits()
         if available is None:
@@ -133,19 +176,64 @@ class SmartleadClient:
         return available > 0
 
     def _mark_spent(self, n: int = 1) -> None:
-        with self._lock:
-            if self._credits_available is not None:
-                self._credits_available = max(0, self._credits_available - n)
-                if self._credits_used is not None:
-                    self._credits_used += n
-                if self._credits_available <= 0:
-                    self._exhausted = True
+        with _CREDITS.lock:
+            if _CREDITS.available is not None:
+                _CREDITS.available = max(0, _CREDITS.available - n)
+                if _CREDITS.used is not None:
+                    _CREDITS.used += n
+                if _CREDITS.available <= 0:
+                    _CREDITS.exhausted = True
 
-    def _mark_exhausted(self) -> None:
-        with self._lock:
-            self._credits_available = 0
-            self._exhausted = True
-            self._checked_at = time.monotonic()
+    def _mark_exhausted(self, *, force: bool = False) -> None:
+        with _CREDITS.lock:
+            if not force and not _allotment_spent(
+                _CREDITS.available, _CREDITS.used, _CREDITS.total
+            ):
+                return
+            _CREDITS.available = 0
+            _CREDITS.exhausted = True
+            _CREDITS.checked_at = time.monotonic()
+
+    # Test / debug aliases — credit state is process-wide.
+    @property
+    def _credits_available(self) -> int | None:
+        return _CREDITS.available
+
+    @_credits_available.setter
+    def _credits_available(self, value: int | None) -> None:
+        _CREDITS.available = value
+
+    @property
+    def _credits_total(self) -> int | None:
+        return _CREDITS.total
+
+    @_credits_total.setter
+    def _credits_total(self, value: int | None) -> None:
+        _CREDITS.total = value
+
+    @property
+    def _credits_used(self) -> int | None:
+        return _CREDITS.used
+
+    @_credits_used.setter
+    def _credits_used(self, value: int | None) -> None:
+        _CREDITS.used = value
+
+    @property
+    def _checked_at(self) -> float:
+        return _CREDITS.checked_at
+
+    @_checked_at.setter
+    def _checked_at(self, value: float) -> None:
+        _CREDITS.checked_at = value
+
+    @property
+    def _exhausted(self) -> bool:
+        return _CREDITS.exhausted
+
+    @_exhausted.setter
+    def _exhausted(self, value: bool) -> None:
+        _CREDITS.exhausted = value
 
     def find_email(
         self, first_name: str, last_name: str, domain: str, company_name: str = ""
@@ -163,38 +251,47 @@ class SmartleadClient:
             return None
 
         self.calls += 1
-        r = http_client.post(
-            self.tier,
-            self._url(FIND_EMAILS_PATH),
-            json={
-                "contacts": [
-                    {
-                        "firstName": first,
-                        "lastName": last,
-                        "companyDomain": host,
-                    }
-                ]
-            },
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            timeout=self.timeout,
-        )
+        body: Any = None
+        r = None
+        for attempt in range(4):
+            r = http_client.post(
+                self.tier,
+                self._url(FIND_EMAILS_PATH),
+                json={
+                    "contacts": [
+                        {
+                            "firstName": first,
+                            "lastName": last,
+                            "companyDomain": host,
+                        }
+                    ]
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=self.timeout,
+            )
+            if r is None:
+                return None
+            body = _safe_json(r)
+            if _is_throttle(r, body):
+                if attempt < 3:
+                    time.sleep(_throttle_wait(attempt, r))
+                    continue
+                return None
+            break
         if r is None:
             return None
-        if r.status_code == 402:
+        if getattr(r, "status_code", 0) == 402:
+            self._mark_exhausted(force=True)
+            return None
+        if _is_credit_zero(r, body):
             self._mark_exhausted()
             return None
-        try:
-            body: Any = r.json()
-        except ValueError:
-            return None
         if r.status_code >= 400:
-            if r.status_code == 429:
-                return None
             return None
         if not isinstance(body, dict) or body.get("success") is False:
-            message = str(body.get("message") or body.get("error") or "").lower()
-            if "credit" in message or "payment" in message:
-                self._mark_exhausted()
             return None
 
         self._mark_spent(1)
@@ -220,6 +317,72 @@ class SmartleadClient:
             status=status or "found",
             raw=row or body,
         )
+
+
+def _safe_json(r: Any) -> Any:
+    try:
+        return r.json()
+    except ValueError:
+        return None
+
+
+def _message_of(body: Any) -> str:
+    if not isinstance(body, dict):
+        return ""
+    return str(body.get("message") or body.get("error") or body.get("msg") or "").lower()
+
+
+def _allotment_spent(
+    available: int | None, used: int | None, total: int | None
+) -> bool:
+    if available is not None and available <= 0:
+        return True
+    if used is not None and total is not None and total > 0 and used >= total:
+        return True
+    if available is None and used is None and total is None:
+        return True
+    return False
+
+
+def _is_throttle(r: Any, body: Any) -> bool:
+    if getattr(r, "status_code", 0) == 429:
+        return True
+    headers = getattr(r, "headers", None) or {}
+    if headers.get("Retry-After") and getattr(r, "status_code", 0) >= 400:
+        return True
+    msg = _message_of(body)
+    if any(token in msg for token in _THROTTLE_MARKERS):
+        return True
+    if "credit" in msg and not any(token in msg for token in _CREDIT_ZERO_MARKERS):
+        snap_used = _CREDITS.used
+        snap_total = _CREDITS.total
+        if snap_used is not None and snap_total is not None and snap_used < snap_total:
+            return True
+    return False
+
+
+def _is_credit_zero(r: Any, body: Any) -> bool:
+    if _is_throttle(r, body):
+        return False
+    if getattr(r, "status_code", 0) == 402:
+        return True
+    msg = _message_of(body)
+    if any(token in msg for token in _CREDIT_ZERO_MARKERS):
+        return True
+    if "credit" in msg or "payment" in msg:
+        return _allotment_spent(_CREDITS.available, _CREDITS.used, _CREDITS.total)
+    return False
+
+
+def _throttle_wait(attempt: int, r: Any) -> float:
+    headers = getattr(r, "headers", None) or {}
+    retry_after = str(headers.get("Retry-After") or "").strip()
+    if retry_after:
+        try:
+            return max(0.0, float(retry_after))
+        except ValueError:
+            pass
+    return min(60.0, 5 * (2**attempt))
 
 
 def _as_int(value: Any) -> int | None:

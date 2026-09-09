@@ -184,7 +184,7 @@ def test_writeback_patches_wf_columns(monkeypatch) -> None:
     src = table_source.parse_source(
         {"project_id": "kemvxzhcxvynmoutwdrh", "table": "ew_names_ready"}
     )
-    src._present_writeback = set(table_source.WRITEBACK_COLUMNS)
+    src._present_writeback = set(table_source.ALL_WRITEBACK_COLUMNS)
     calls: list[tuple[str, str, dict]] = []
 
     def fake_request(method, path, **kwargs):
@@ -207,7 +207,38 @@ def test_writeback_patches_wf_columns(monkeypatch) -> None:
     assert body["wf_email"] == "jane@org.org"
     assert body["wf_status"] == "found"
     assert body["wf_vendor"] == "leadmagic"
+    assert body["dl_status"] == "found"
+    assert body["candidate_email"] == "jane@org.org"
+    assert body["dl_provider"] == "leadmagic"
     assert "wf_updated_at" in body
+
+
+def test_writeback_dl_status_without_wf_columns(monkeypatch) -> None:
+    src = table_source.parse_source(
+        {"table": "client_peterson.email_resolution"}
+    )
+    src._present_writeback = {"dl_status", "candidate_email", "dl_provider"}
+    calls: list[tuple[str, str, dict]] = []
+
+    def fake_rpc(path, body, **kwargs):
+        calls.append((path, body))
+        return {}
+
+    monkeypatch.setattr(table_source, "resolve_credentials", lambda pid: ("https://x", "k"))
+    monkeypatch.setattr(table_source, "_rpc_json", fake_rpc)
+    table_source.writeback_result(
+        src,
+        key=7,
+        status="not_found",
+        email="",
+        email_status="not_found",
+        vendor="smartlead",
+    )
+    assert calls[0][0] == "rpc/ew_patch_source"
+    fields = calls[0][1]["p_fields"]
+    assert fields["dl_status"] == "not_found"
+    assert fields["dl_provider"] == "smartlead"
+    assert "wf_status" not in fields
 
 
 def test_source_enrich_writes_back(monkeypatch) -> None:

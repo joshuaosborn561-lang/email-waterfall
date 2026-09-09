@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from email_waterfall.vendors.smartlead import SmartleadClient
+import pytest
+
+from email_waterfall.vendors.smartlead import SmartleadClient, reset_shared_credits
+
+
+@pytest.fixture(autouse=True)
+def _fresh_credits() -> None:
+    reset_shared_credits()
+    yield
+    reset_shared_credits()
 
 
 class _Resp:
@@ -132,6 +141,74 @@ def test_refresh_credits_from_analytics(monkeypatch) -> None:
     assert snap["total"] == 100
     assert snap["used"] == 58
     assert snap["exhausted"] is False
+
+
+def test_429_does_not_exhaust_and_retries(monkeypatch) -> None:
+    client = SmartleadClient(api_key="sl_test")
+    client._credits_available = 49675
+    client._credits_total = 50000
+    client._credits_used = 325
+    client._checked_at = 10**9
+    calls = {"n": 0}
+
+    def fake_post(*a, **k):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return _Resp(
+                429,
+                {"success": False, "message": "Rate limit exceeded. Credits in use."},
+            )
+        return _Resp(
+            200,
+            {
+                "success": True,
+                "data": [
+                    {
+                        "email_id": "jane@roofco.com",
+                        "status": "Found",
+                        "verification_status": "Valid",
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr("email_waterfall.vendors.smartlead.time.sleep", lambda *_: None)
+    monkeypatch.setattr("email_waterfall.http_client.post", fake_post)
+    hit = client.find_email("Jane", "Smith", "roofco.com")
+    assert hit is not None
+    assert hit.email == "jane@roofco.com"
+    assert calls["n"] == 3
+    snap = client.credit_snapshot()
+    assert snap["exhausted"] is False
+    assert snap["used"] == 326
+    assert snap["total"] == 50000
+    assert client.enabled is True
+
+
+def test_credit_word_in_throttle_does_not_zero_allotment(monkeypatch) -> None:
+    client = SmartleadClient(api_key="sl_test")
+    client._credits_available = 49675
+    client._credits_total = 50000
+    client._credits_used = 325
+    client._checked_at = 10**9
+    monkeypatch.setattr("email_waterfall.vendors.smartlead.time.sleep", lambda *_: None)
+    monkeypatch.setattr(
+        "email_waterfall.http_client.post",
+        lambda *a, **k: _Resp(
+            200,
+            {
+                "success": False,
+                "message": "Rate limit exceeded. Please wait before using more credits.",
+            },
+        ),
+    )
+    assert client.find_email("Jane", "Smith", "roofco.com") is None
+    snap = client.credit_snapshot()
+    assert snap["exhausted"] is False
+    assert snap["available"] == 49675
+    assert snap["used"] == 325
+    assert snap["total"] == 50000
+    assert client.enabled is True
 
 
 def test_rejects_invalid_verification(monkeypatch) -> None:
