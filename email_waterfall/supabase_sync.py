@@ -166,18 +166,41 @@ def dedupe_contacts_with_email(rows: list[dict[str, Any]]) -> list[dict[str, Any
     return [seen[k] for k in order]
 
 
+def _is_missing_relation(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in ("404", "pgrst205", "pgrst116", "does not exist", "not find")
+    )
+
+
 def upsert_companies(client: ClientConfig, rows: list[dict[str, Any]]) -> int:
     rows = dedupe_companies(rows)
     if not rows:
         return 0
     written = 0
+    retried = False
     for batch in _chunks(rows):
-        _request(
-            "POST",
-            f"{client.companies_table}?on_conflict=domain",
-            body=batch,
-            prefer="resolution=merge-duplicates,return=minimal",
-        )
+        try:
+            _request(
+                "POST",
+                f"{client.companies_table}?on_conflict=domain",
+                body=batch,
+                prefer="resolution=merge-duplicates,return=minimal",
+            )
+        except RuntimeError as exc:
+            if retried or not _is_missing_relation(exc):
+                raise
+            from .clients import ensure_client
+
+            ensure_client(client.tag, write_supabase=True)
+            retried = True
+            _request(
+                "POST",
+                f"{client.companies_table}?on_conflict=domain",
+                body=batch,
+                prefer="resolution=merge-duplicates,return=minimal",
+            )
         written += len(batch)
     return written
 

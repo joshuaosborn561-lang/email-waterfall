@@ -282,13 +282,19 @@ def enrich_waterfall(
     require_title_match: bool = True,
     background: bool = True,
     source: Any = None,
+    source_table: str = "",
+    where: str = "",
     estimate_only: bool = False,
     writeback: bool = True,
 ) -> str:
     """Resolve DMs + work emails + cellphones via paid vendors; write public.{client}_*.
 
-    Pass either `rows` or `source`, never both. Response is counts / job_id / cost
-    only — never row payloads.
+    Pass either `rows` or `source_table`/`source`, never both. Response is
+    counts / job_id / cost only — never row payloads.
+
+    Prefer `source_table` + `where` (Maps-scraper style), e.g.
+    source_table='client_peterson.email_resolution', where='candidate_email is null'.
+    The server pages 500 rows and never returns payloads.
 
     `rows` = JSON list of {domain?, company_name?, first_name?, last_name?, title?,
     email?, linkedin_url?, phone?, cellphone?, mobile?, place_id?, city?, state?}.
@@ -296,17 +302,19 @@ def enrich_waterfall(
     rows skip getleads/Smartlead and enter at AI Ark → LeadMagic → Prospeo →
     FullEnrich. company_name is passed to FullEnrich verbatim.
 
-    `source` = {project_id, schema?, table, where?, key_column?, map?, limit?,
-    cursor?} to read rows server-side from Supabase in pages of 500. Optional
-    writeback (default true) patches wf_status / wf_email / wf_email_status /
+    `source` = optional richer object {project_id, schema?, table, where?,
+    key_column?, map?, limit?, cursor?}. Mutually exclusive with rows.
+
+    Writeback (default true) patches wf_status / wf_email / wf_email_status /
     wf_vendor / wf_updated_at on the source table.
 
     `estimate_only` = true returns row counts per mode, tiers each mode will
     touch, and a per-vendor credit estimate. Zero spend. Required before paid
     source runs.
 
-    client_tag is required (any snake_case). Unknown tags auto-ensure write tables
-    as public.{tag}_wf_companies / _wf_contacts. Never omit it.
+    client_tag is required (any snake_case). enrich_waterfall always calls
+    ensure_client first — including builtin peterson/basco — so write tables
+    exist before the first upsert. Never omit client_tag.
     need = 'dm' | 'email' | 'both' | 'phone'.
     max_tier = 'getleads' | 'smartlead' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
     (default 'leadmagic' / alias 'lm' — stops before Prospeo and FullEnrich).
@@ -314,12 +322,12 @@ def enrich_waterfall(
     _ensure_repo_cwd()
     _reload_settings()
     from email_waterfall import waterfall as wf
-    from email_waterfall.clients import get_client
+    from email_waterfall.clients import ensure_client
 
     need_norm = (need or "both").strip().lower()
     if need_norm not in ("email", "dm", "both", "phone"):
         raise ValueError("need must be 'email', 'dm', 'both', or 'phone'")
-    client = get_client(client_tag)
+    client = ensure_client(client_tag, write_supabase=not estimate_only)
     max_tier_n = wf.normalize_max_tier(max_tier)
 
     def _run_enrich(
@@ -335,6 +343,8 @@ def enrich_waterfall(
             write_supabase=not estimate_only,
             progress_callback=progress_callback,
             source=source,
+            source_table=source_table or None,
+            where=where or None,
             estimate_only=bool(estimate_only),
             writeback=bool(writeback) and not estimate_only,
         )
@@ -349,7 +359,7 @@ def enrich_waterfall(
 
     if estimate_only:
         return _json(_run_enrich())
-    if source not in (None, "", {}):
+    if source not in (None, "", {}) or (source_table or "").strip():
         rows_chars = 50_000
     else:
         rows_chars = (
@@ -366,9 +376,10 @@ def enrich_waterfall(
                 "max_tier": max_tier_n,
                 "client_tag": client.tag,
                 "rows_chars": rows_chars,
-                "source_table": (source or {}).get("table")
-                if isinstance(source, dict)
-                else None,
+                "source_table": (source_table or "").strip()
+                or (
+                    (source or {}).get("table") if isinstance(source, dict) else None
+                ),
             },
         )
         return _json(

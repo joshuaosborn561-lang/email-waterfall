@@ -25,17 +25,28 @@ which auto-ensures) to create write tables — no deploy needed for a new client
 Never omit `client_tag`. Never write to a shared contacts table.
 
 ## Default flow
-1. Optional: `ensure_client({ client_tag, profile, target_titles })` for a new client.
-2. Prefer `source` (Supabase table) over inline `rows` so lead payloads stay
-   out of chat. If you must use `rows`, pass domain and/or name+company.
+1. `enrich_waterfall` always auto-runs `ensure_client` first, including builtin
+   tags (`peterson`, `basco`). Do not skip this — a missing `peterson_companies`
+   table is a 404, not a "pass rows" problem.
+2. Prefer `source_table` + `where` over inline `rows` so lead payloads stay
+   out of chat. Peterson queue: `client_peterson.email_resolution`.
 3. For any paid source run, call `estimate_only=true` first.
 4. If the tool returns `job_id`, poll `get_job_status` until completed/failed.
 5. Report counts / cost only. Do not dump contact payloads.
 
 ## Table source
-`source` is mutually exclusive with `rows`. The server pages 500 rows at a time
-and never returns payloads. Writeback (default on) patches `wf_status`,
+Maps-scraper style params, mutually exclusive with `rows`:
+
+```
+source_table: "client_peterson.email_resolution"
+where: "candidate_email is null"
+```
+
+`source_table` accepts `schema.table`. The server pages 500 rows via a
+security-definer RPC when the schema is not `public` (PostgREST only exposes
+public). Never returns payloads. Writeback (default on) patches `wf_status`,
 `wf_email`, `wf_email_status`, `wf_vendor`, `wf_updated_at` on the source table.
+Omitted `map` auto-picks `owner_title` → title and `candidate_email` → email.
 
 ## Name + company (no domain)
 Rows with first_name + last_name + company_name and no domain are tagged

@@ -44,6 +44,37 @@ def test_legacy_basco_peterson_table_names() -> None:
     assert get_client("salesglider").contacts_table == "salesglider_wf_contacts"
 
 
+def test_enrich_always_ensures_builtin_peterson(monkeypatch) -> None:
+    from email_waterfall import waterfall
+
+    called: dict = {}
+
+    def fake_ensure(tag, **kwargs):
+        called["tag"] = tag
+        called["write"] = kwargs.get("write_supabase")
+        return ensure_client(tag, write_supabase=False)
+
+    monkeypatch.setattr(waterfall, "ensure_client", fake_ensure)
+    waterfall.enrich_waterfall(
+        [{"domain": "roofco.com", "first_name": "A", "last_name": "B"}],
+        client_tag="peterson",
+        write_supabase=True,
+        estimate_only=True,
+    )
+    assert called["tag"] == "peterson"
+    assert called["write"] is False
+
+    called.clear()
+    waterfall.enrich_waterfall(
+        [],
+        client_tag="peterson",
+        write_supabase=True,
+        estimate_only=False,
+    )
+    assert called["tag"] == "peterson"
+    assert called["write"] is True
+
+
 def test_get_client_auto_ensures_unknown_tag() -> None:
     client = get_client("brand_new_shop")
     assert client.tag == "brand_new_shop"

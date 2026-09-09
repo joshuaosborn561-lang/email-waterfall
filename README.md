@@ -44,7 +44,24 @@ Rows with `first_name` + `last_name` + `company_name` and no domain are tagged `
 
 ## MCP tool: `enrich_waterfall`
 
-Pass **either** `rows` **or** `source`, never both. Prefer `source` so lead payloads stay out of chat.
+Pass **either** `rows` **or** `source_table` / `source`, never both. Prefer `source_table` + `where` (same shape as the Maps scraper) so lead payloads stay out of chat.
+
+`enrich_waterfall` always calls `ensure_client` before writes, including builtin `peterson` / `basco`. That creates `public.peterson_companies` if it is missing and refreshes the PostgREST schema cache — the first job must not 404.
+
+Peterson queue:
+
+```json
+{
+  "source_table": "client_peterson.email_resolution",
+  "where": "candidate_email is null",
+  "client_tag": "peterson",
+  "need": "email",
+  "max_tier": "leadmagic",
+  "estimate_only": true
+}
+```
+
+Richer `source` object still works:
 
 ```json
 {

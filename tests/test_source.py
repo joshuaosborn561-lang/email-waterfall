@@ -69,7 +69,7 @@ def test_parse_source_omitted_map_defaults_required_fields() -> None:
 
 
 def test_rows_and_source_are_mutually_exclusive() -> None:
-    with pytest.raises(ValueError, match="mutually exclusive|not both"):
+    with pytest.raises(ValueError, match="not both"):
         waterfall.enrich_waterfall(
             [{"first_name": "A", "last_name": "B", "company_name": "C"}],
             client_tag="peterson",
@@ -84,6 +84,58 @@ def test_source_or_rows_required() -> None:
         waterfall.enrich_waterfall(
             None, client_tag="peterson", write_supabase=False, estimate_only=True
         )
+
+
+def test_parse_source_table_qualified() -> None:
+    src = table_source.parse_source({"table": "client_peterson.email_resolution"})
+    assert src.schema == "client_peterson"
+    assert src.table == "email_resolution"
+
+
+def test_source_table_and_where_top_level(monkeypatch) -> None:
+    fetched = [
+        {
+            "_source_key": 1,
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "company_name": "Helping Hands",
+            "domain": "helpinghands.org",
+        }
+    ]
+    monkeypatch.setattr(waterfall.table_source, "fetch_source_rows", lambda src: fetched)
+    out = waterfall.enrich_waterfall(
+        client_tag="peterson",
+        need="email",
+        source_table="client_peterson.email_resolution",
+        where="candidate_email is null",
+        estimate_only=True,
+        write_supabase=False,
+    )
+    assert out["rows_in"] == 1
+    assert out["modes"]["domain"] == 1
+    assert out["spend"] == 0
+
+
+def test_discover_maps_owner_title_and_candidate_email(monkeypatch) -> None:
+    src = table_source.parse_source({"table": "client_peterson.email_resolution"})
+    monkeypatch.setattr(
+        table_source,
+        "list_table_columns",
+        lambda _src: {
+            "id",
+            "first_name",
+            "last_name",
+            "company_name",
+            "domain",
+            "owner_title",
+            "candidate_email",
+            "city",
+        },
+    )
+    table_source.discover_column_map(src)
+    assert src.column_map["title"] == "owner_title"
+    assert src.column_map["email"] == "candidate_email"
+    assert src.column_map["domain"] == "domain"
 
 
 def test_fetch_pages_500(monkeypatch) -> None:
@@ -118,6 +170,7 @@ def test_fetch_pages_500(monkeypatch) -> None:
         return 200, json.dumps(rows)
 
     monkeypatch.setattr(table_source, "resolve_credentials", lambda pid: ("https://x", "k"))
+    monkeypatch.setattr(table_source, "list_table_columns", lambda _src: None)
     monkeypatch.setattr(table_source.supabase_sync, "request_on", fake_request)
     mapped = table_source.fetch_source_rows(src)
     assert len(mapped) == 500

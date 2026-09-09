@@ -38,6 +38,8 @@ def test_enrich_waterfall_has_source_and_estimate_only() -> None:
 
     params = inspect.signature(enrich_waterfall).parameters
     assert "source" in params
+    assert "source_table" in params
+    assert "where" in params
     assert "estimate_only" in params
     assert "writeback" in params
     assert params["rows"].default is None

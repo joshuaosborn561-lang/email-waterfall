@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 
 from . import source as table_source
 from . import supabase_sync
-from .clients import ClientConfig, get_client, parse_target_titles
+from .clients import ClientConfig, ensure_client, parse_target_titles
 from .concurrency import company_concurrency
 from .people import looks_like_person, pick_best_person
 from .vendors.ai_ark import AiArkClient
@@ -1096,11 +1096,16 @@ def enrich_waterfall(
     parallel: bool = True,
     progress_callback: ProgressCallback | None = None,
     source: Any = None,
+    source_table: str | None = None,
+    where: str | None = None,
     estimate_only: bool = False,
     writeback: bool | None = None,
 ) -> dict[str, Any]:
     """Walk paid vendors per row; upsert isolated client tables; return counts."""
-    client = get_client(client_tag)
+    client = ensure_client(
+        client_tag,
+        write_supabase=bool(write_supabase) and not estimate_only,
+    )
     max_tier_n = normalize_max_tier(max_tier)
     need_norm = (need or "both").strip().lower()
     if need_norm not in ("email", "dm", "both", "phone"):
@@ -1112,16 +1117,19 @@ def enrich_waterfall(
     else:
         titles = parse_target_titles(target_titles, client)
 
+    merged = table_source.coerce_source(
+        source, source_table=source_table, where=where, writeback=writeback
+    )
     has_rows = rows is not None and rows != ""
-    has_source = source not in (None, "", {})
+    has_source = merged is not None
     if has_rows and has_source:
-        raise ValueError("pass rows or source, not both")
+        raise ValueError("pass rows or source_table/source, not both")
     if not has_rows and not has_source:
-        raise ValueError("rows or source is required")
+        raise ValueError("rows or source_table is required")
 
     table_src: table_source.TableSource | None = None
     if has_source:
-        table_src = table_source.parse_source(source)
+        table_src = table_source.parse_source(merged)
         if writeback is not None:
             table_src.writeback = bool(writeback)
         if estimate_only:
