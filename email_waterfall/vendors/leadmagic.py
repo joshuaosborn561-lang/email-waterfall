@@ -53,15 +53,22 @@ class LeadMagicClient:
             return None
 
     def find_email(
-        self, first_name: str, last_name: str, domain: str, company_name: str = ""
+        self, first_name: str, last_name: str, domain: str = "", company_name: str = ""
     ) -> EmailHit | None:
+        first = (first_name or "").strip()
+        last = (last_name or "").strip()
+        domain = (domain or "").strip()
+        company = (company_name or "").strip()
+        if not first or not last or not (domain or company):
+            return None
         body: dict[str, Any] = {
-            "first_name": first_name,
-            "last_name": last_name,
-            "domain": domain,
+            "first_name": first,
+            "last_name": last,
         }
-        if company_name:
-            body["company_name"] = company_name
+        if domain:
+            body["domain"] = domain
+        if company:
+            body["company_name"] = company
         data = self._post("/v1/people/email-finder", body)
         if data is None:
             data = self._post("/email-finder", body)

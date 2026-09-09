@@ -73,18 +73,22 @@ class FullEnrichClient:
             first = (row.get("first_name") or "").strip()
             last = (row.get("last_name") or "").strip()
             domain = (row.get("domain") or "").strip()
-            if not first or not last or not domain:
+            company = (row.get("company_name") or "").strip()
+            if not first or not last:
                 continue
-            data.append(
-                {
-                    "first_name": first,
-                    "last_name": last,
-                    "domain": domain,
-                    "company_name": (row.get("company_name") or domain).strip(),
-                    "enrich_fields": ["contact.work_emails"],
-                    "custom": {"idx": str(i)},
-                }
-            )
+            if not domain and not company:
+                continue
+            payload: dict[str, Any] = {
+                "first_name": first,
+                "last_name": last,
+                "enrich_fields": ["contact.work_emails"],
+                "custom": {"idx": str(i)},
+            }
+            if company:
+                payload["company_name"] = company
+            if domain:
+                payload["domain"] = domain
+            data.append(payload)
         if not data:
             return [None] * len(rows)
 

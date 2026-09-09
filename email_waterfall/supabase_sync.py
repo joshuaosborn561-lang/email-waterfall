@@ -42,20 +42,26 @@ def _headers(key: str, *, prefer: str) -> dict[str, str]:
     }
 
 
-def _request(
+def request_on(
     method: str,
     path: str,
     *,
+    url: str,
+    key: str,
     body: Any = None,
     prefer: str = "return=minimal",
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[int, str]:
-    cfg = supabase_config()
-    url = f"{cfg['url']}/rest/v1/{path}"
+    """PostgREST call against an explicit Supabase project (url + service key)."""
+    endpoint = f"{url.rstrip('/')}/rest/v1/{path}"
     data = None if body is None else json.dumps(body).encode("utf-8")
+    headers = _headers(key, prefer=prefer)
+    if extra_headers:
+        headers.update(extra_headers)
     req = request.Request(
-        url,
+        endpoint,
         data=data,
-        headers=_headers(cfg["key"], prefer=prefer),
+        headers=headers,
         method=method,
     )
     try:
@@ -64,8 +70,21 @@ def _request(
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(
-            f"Supabase {method} {url} failed ({exc.code}): {detail[:500]}"
+            f"Supabase {method} {endpoint} failed ({exc.code}): {detail[:500]}"
         ) from exc
+
+
+def _request(
+    method: str,
+    path: str,
+    *,
+    body: Any = None,
+    prefer: str = "return=minimal",
+) -> tuple[int, str]:
+    cfg = supabase_config()
+    return request_on(
+        method, path, url=cfg["url"], key=cfg["key"], body=body, prefer=prefer
+    )
 
 
 def rpc(name: str, body: dict[str, Any] | None = None) -> Any:
@@ -147,18 +166,41 @@ def dedupe_contacts_with_email(rows: list[dict[str, Any]]) -> list[dict[str, Any
     return [seen[k] for k in order]
 
 
+def _is_missing_relation(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in ("404", "pgrst205", "pgrst116", "does not exist", "not find")
+    )
+
+
 def upsert_companies(client: ClientConfig, rows: list[dict[str, Any]]) -> int:
     rows = dedupe_companies(rows)
     if not rows:
         return 0
     written = 0
+    retried = False
     for batch in _chunks(rows):
-        _request(
-            "POST",
-            f"{client.companies_table}?on_conflict=domain",
-            body=batch,
-            prefer="resolution=merge-duplicates,return=minimal",
-        )
+        try:
+            _request(
+                "POST",
+                f"{client.companies_table}?on_conflict=domain",
+                body=batch,
+                prefer="resolution=merge-duplicates,return=minimal",
+            )
+        except RuntimeError as exc:
+            if retried or not _is_missing_relation(exc):
+                raise
+            from .clients import ensure_client
+
+            ensure_client(client.tag, write_supabase=True)
+            retried = True
+            _request(
+                "POST",
+                f"{client.companies_table}?on_conflict=domain",
+                body=batch,
+                prefer="resolution=merge-duplicates,return=minimal",
+            )
         written += len(batch)
     return written
 

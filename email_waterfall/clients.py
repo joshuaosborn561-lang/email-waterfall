@@ -7,6 +7,7 @@ ensure_client (and enrich_waterfall auto-ensure) creates tables via ew_ensure_cl
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 from dataclasses import dataclass, field
@@ -293,6 +294,60 @@ def _local_config(
     )
 
 
+def _coerce_rpc_row(row: Any) -> dict[str, Any] | None:
+    if isinstance(row, list) and row:
+        row = row[0]
+    if isinstance(row, str):
+        try:
+            row = json.loads(row)
+        except ValueError:
+            return None
+    if isinstance(row, dict) and row.get("client_tag"):
+        return row
+    return None
+
+
+def _is_missing_relation(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in ("404", "pgrst205", "pgrst116", "does not exist", "not find")
+    )
+
+
+def _verify_write_tables(client: ClientConfig) -> None:
+    """Confirm PostgREST can see the write tables. Reload-cache 404s after ensure."""
+    from . import supabase_sync
+    from .config import load_settings
+
+    if not load_settings().supabase_configured:
+        return
+    for table in (client.companies_table, client.contacts_table):
+        last_exc: Exception | None = None
+        for _attempt in range(2):
+            try:
+                supabase_sync._request(
+                    "GET",
+                    f"{table}?select=domain&limit=0",
+                    prefer="return=minimal",
+                )
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if not _is_missing_relation(exc):
+                    raise
+                try:
+                    supabase_sync.rpc("ew_ensure_client", {"p_client_tag": client.tag})
+                except Exception:
+                    pass
+        if last_exc is not None:
+            raise RuntimeError(
+                f"auto-ensure failed: public.{table} is not visible to PostgREST "
+                f"({last_exc}). Call ensure_client({client.tag!r}) and retry."
+            ) from last_exc
+
+
 def ensure_client(
     client_tag: str,
     *,
@@ -302,7 +357,11 @@ def ensure_client(
     target_titles: str | list[str] | None = "",
     write_supabase: bool = True,
 ) -> ClientConfig:
-    """Register a client and create isolated write tables. Idempotent."""
+    """Register a client and create isolated write tables. Idempotent.
+
+    Always hits ew_ensure_client when write_supabase=True — including builtin
+    tags like peterson/basco — so peterson_companies is created before writes.
+    """
     tag = normalize_client_tag(client_tag)
     profile_n = (profile or "owner").strip().lower()
     if profile_n not in ("owner", "service"):
@@ -313,9 +372,11 @@ def ensure_client(
         titles = tuple(p.strip() for p in (target_titles or "").split(",") if p.strip())
 
     cfg: ClientConfig | None = None
+    rpc_error: Exception | None = None
     if write_supabase:
         try:
             from . import supabase_sync
+            from .config import load_settings
 
             payload: dict[str, Any] = {
                 "p_client_tag": tag,
@@ -325,8 +386,8 @@ def ensure_client(
             }
             if titles:
                 payload["p_titles"] = list(titles)
-            row = supabase_sync.rpc("ew_ensure_client", payload)
-            if isinstance(row, dict) and row.get("client_tag"):
+            row = _coerce_rpc_row(supabase_sync.rpc("ew_ensure_client", payload))
+            if row is not None:
                 cfg = _from_row(
                     {
                         **row,
@@ -334,7 +395,12 @@ def ensure_client(
                         "display_name": display_name or row.get("display_name") or tag,
                     }
                 )
-        except Exception:
+            elif load_settings().supabase_configured:
+                rpc_error = RuntimeError(
+                    f"ew_ensure_client returned no client_tag for {tag}"
+                )
+        except Exception as exc:
+            rpc_error = exc
             cfg = None
 
     if cfg is None:
@@ -349,11 +415,23 @@ def ensure_client(
     with _lock:
         _registry[cfg.tag] = cfg
         CLIENTS[cfg.tag] = cfg
+
+    if write_supabase:
+        try:
+            _verify_write_tables(cfg)
+        except Exception:
+            if rpc_error is not None:
+                raise RuntimeError(
+                    f"ensure_client({tag!r}) could not create write tables: {rpc_error}"
+                ) from rpc_error
+            raise
     return cfg
 
 
-def get_client(client_tag: str | None) -> ClientConfig:
+def get_client(client_tag: str | None, *, ensure: bool = False) -> ClientConfig:
     tag = normalize_client_tag(client_tag)
+    if ensure:
+        return ensure_client(tag)
     _ensure_db_loaded()
     with _lock:
         cached = _registry.get(tag)

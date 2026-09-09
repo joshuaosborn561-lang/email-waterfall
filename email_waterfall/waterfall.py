@@ -21,8 +21,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
 
+from . import source as table_source
 from . import supabase_sync
-from .clients import ClientConfig, get_client, parse_target_titles
+from .clients import ClientConfig, ensure_client, parse_target_titles
 from .concurrency import company_concurrency
 from .people import looks_like_person, pick_best_person
 from .vendors.ai_ark import AiArkClient
@@ -46,6 +47,15 @@ TIER_ORDER: list[str] = [
 ]
 TIER_RANK = {name: i for i, name in enumerate(TIER_ORDER)}
 DEFAULT_MAX_TIER: MaxTier = "leadmagic"
+NAME_COMPANY_TIERS: tuple[str, ...] = ("aiark", "leadmagic", "prospeo", "fullenrich")
+CREDIT_PER_ATTEMPT: dict[str, float] = {
+    "getleads": 1.0,
+    "smartlead": 1.0,
+    "aiark": 1.5,
+    "leadmagic": 1.0,
+    "prospeo": 1.0,
+    "fullenrich": 1.0,
+}
 
 
 def normalize_max_tier(max_tier: str | None) -> str:
@@ -114,11 +124,15 @@ def _norm_row(r: dict[str, Any]) -> dict[str, Any]:
     email = str(r.get("email") or "").strip().lower()
     if not domain and email and "@" in email:
         domain = _host_from(email.split("@", 1)[1])
+    company = str(
+        r.get("company_name") or r.get("company") or r.get("business_name") or ""
+    ).strip()
+    mode = "domain" if domain else (
+        "name_company" if first and last and company else ""
+    )
     return {
         "domain": domain,
-        "company_name": str(
-            r.get("company_name") or r.get("company") or r.get("business_name") or ""
-        ).strip(),
+        "company_name": company,
         "first_name": first,
         "last_name": last,
         "full_name": full or f"{first} {last}".strip(),
@@ -137,11 +151,126 @@ def _norm_row(r: dict[str, Any]) -> dict[str, Any]:
         ).strip(),
         "ai_ark_id": str(r.get("ai_ark_id") or r.get("person_id") or "").strip(),
         "source": str(r.get("source") or "waterfall").strip() or "waterfall",
+        "mode": mode,
+        "_source_key": r.get("_source_key"),
     }
 
 
 def _empty_stats() -> dict[str, int]:
     return {"calls": 0, "email_hits": 0, "dm_hits": 0, "phone_hits": 0}
+
+
+def _domain_from_email(email: str) -> str:
+    raw = (email or "").strip().lower()
+    if "@" not in raw:
+        return ""
+    return _host_from(raw.split("@", 1)[1])
+
+
+def _domain_from_raw(raw: Any) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    for key in ("domain", "company_domain", "website", "company_website"):
+        host = _host_from(str(raw.get(key) or ""))
+        if host:
+            return host
+    account = raw.get("account") or raw.get("company") or {}
+    if isinstance(account, dict):
+        return _host_from(str(account.get("domain") or account.get("website") or ""))
+    return ""
+
+
+def _fill_row_domain(row: dict[str, Any], *, email: str = "", raw: Any = None) -> None:
+    if row.get("domain"):
+        return
+    host = _domain_from_email(email) or _domain_from_raw(raw)
+    if host:
+        row["domain"] = host
+
+
+def _tiers_for_mode(mode: str, max_tier: str) -> list[str]:
+    allowed = [t for t in TIER_ORDER if tier_allowed(t, max_tier)]
+    if mode == "name_company":
+        return [t for t in allowed if t in NAME_COMPANY_TIERS]
+    if mode == "domain":
+        return allowed
+    return []
+
+
+def classify_rows(parsed: list[dict[str, Any]]) -> dict[str, int]:
+    modes = {"domain": 0, "name_company": 0, "skipped": 0}
+    for row in parsed:
+        mode = row.get("mode") or ""
+        if mode in modes:
+            modes[mode] += 1
+        else:
+            modes["skipped"] += 1
+    return modes
+
+
+def estimate_waterfall(
+    parsed: list[dict[str, Any]],
+    *,
+    max_tier: str,
+    need: str,
+    client: ClientConfig,
+) -> dict[str, Any]:
+    """Counts + per-vendor credit estimate. No enrichment vendor calls."""
+    max_tier_n = normalize_max_tier(max_tier)
+    modes = classify_rows(parsed)
+    tiers_by_mode = {
+        mode: _tiers_for_mode(mode, max_tier_n)
+        for mode in ("domain", "name_company")
+        if modes.get(mode)
+    }
+    vendor_rows: dict[str, int] = {t: 0 for t in TIER_ORDER}
+    for mode, count in modes.items():
+        if mode == "skipped" or not count:
+            continue
+        for tier in _tiers_for_mode(mode, max_tier_n):
+            vendor_rows[tier] += count
+
+    credits: dict[str, Any] = {}
+    sl = SmartleadClient(timeout=8)
+    if sl.enabled:
+        try:
+            sl.refresh_credits(force=True)
+        except Exception:
+            pass
+    sl_snap = sl.credit_snapshot() if sl.api_key else {}
+
+    for tier, count in vendor_rows.items():
+        if not count and not (tier == "smartlead" and sl_snap):
+            continue
+        row = {
+            "rows": count,
+            "credits_est": round(count * CREDIT_PER_ATTEMPT.get(tier, 1.0), 2),
+            "credits_per_row": CREDIT_PER_ATTEMPT.get(tier, 1.0),
+            "credits_available": None,
+        }
+        if tier == "smartlead":
+            row["credits_available"] = sl_snap.get("available")
+            row["credits_total"] = sl_snap.get("total")
+            row["credits_used"] = sl_snap.get("used")
+        if count:
+            credits[tier] = row
+
+    mode_counts = {k: v for k, v in modes.items() if k != "skipped" and v}
+    if modes.get("skipped"):
+        mode_counts["skipped"] = modes["skipped"]
+    return {
+        "estimate_only": True,
+        "rows_in": sum(v for k, v in modes.items() if k != "skipped"),
+        "modes": mode_counts,
+        "tiers_by_mode": tiers_by_mode,
+        "estimate": credits,
+        "need": need,
+        "max_tier": max_tier_n,
+        "client_tag": client.tag,
+        "companies_table": client.companies_table,
+        "contacts_table": client.contacts_table,
+        "spend": 0,
+    }
 
 
 class Waterfall:
@@ -204,6 +333,7 @@ class Waterfall:
             (row.get("first_name") or "").lower(),
             (row.get("last_name") or "").lower(),
             row.get("domain") or "",
+            (row.get("company_name") or "").lower(),
             (row.get("linkedin_url") or "").lower(),
             (row.get("phone") or "").strip(),
             str(row.get("ai_ark_id") or ""),
@@ -218,11 +348,17 @@ class Waterfall:
         linkedin = row.get("linkedin_url") or ""
         phone = row.get("phone") or ""
         person_id = str(row.get("ai_ark_id") or "")
+        company = row.get("company_name") or ""
         has_name_domain = bool(first and last and domain)
+        has_name_company = bool(first and last and company)
         can_aiark = bool(
-            linkedin or person_id or has_name_domain or (phone and (first or last or domain))
+            linkedin
+            or person_id
+            or has_name_domain
+            or has_name_company
+            or (phone and (first or last or domain or company))
         )
-        if not has_name_domain and not can_aiark:
+        if not has_name_domain and not can_aiark and not has_name_company:
             return None
         cache_key = self._email_cache_key(row)
         with self._lock:
@@ -230,7 +366,6 @@ class Waterfall:
                 return self._email_cache[cache_key]
 
         hit: EmailHit | None = None
-        company = row.get("company_name") or ""
 
         if has_name_domain and self.getleads.enabled and self._allowed("getleads"):
             self._bump("getleads", "calls")
@@ -263,10 +398,12 @@ class Waterfall:
             )
             if hit:
                 self._bump("aiark", "email_hits")
+                _fill_row_domain(row, email=hit.email, raw=hit.raw)
+                domain = row.get("domain") or domain
 
         if (
             not hit
-            and has_name_domain
+            and (has_name_domain or has_name_company)
             and self.leadmagic.enabled
             and self._allowed("leadmagic")
         ):
@@ -274,8 +411,10 @@ class Waterfall:
             hit = self.leadmagic.find_email(first, last, domain, company)
             if hit:
                 self._bump("leadmagic", "email_hits")
+                _fill_row_domain(row, email=hit.email, raw=hit.raw)
+                domain = row.get("domain") or domain
 
-        can_prospeo = bool(linkedin or has_name_domain)
+        can_prospeo = bool(linkedin or has_name_domain or has_name_company)
         if not hit and can_prospeo and self.prospeo.enabled and self._allowed("prospeo"):
             self._bump("prospeo", "calls")
             hit = self.prospeo.find_email(
@@ -288,11 +427,13 @@ class Waterfall:
             )
             if hit:
                 self._bump("prospeo", "email_hits")
+                _fill_row_domain(row, email=hit.email, raw=hit.raw)
+                domain = row.get("domain") or domain
 
         if (
             not hit
             and include_fullenrich
-            and has_name_domain
+            and (has_name_domain or has_name_company)
             and self.fullenrich.enabled
             and self._allowed("fullenrich")
         ):
@@ -300,6 +441,7 @@ class Waterfall:
             hit = self.fullenrich.find_email(first, last, domain, company)
             if hit:
                 self._bump("fullenrich", "email_hits")
+                _fill_row_domain(row, email=hit.email, raw=hit.raw)
 
         with self._lock:
             self._email_cache[cache_key] = hit
@@ -307,7 +449,8 @@ class Waterfall:
 
     def resolve_dm(self, row: dict[str, Any]) -> PersonHit | None:
         domain = row["domain"]
-        if not domain:
+        company = row.get("company_name") or ""
+        if not domain and not (row.get("mode") == "name_company" and company):
             return None
 
         best: PersonHit | None = None
@@ -356,28 +499,37 @@ class Waterfall:
         if primary_found():
             return best
 
+        cache_key = domain or f"name_company:{company.lower()}"
         with self._lock:
-            if domain in self._vendor_dm_cache:
-                consider(self._vendor_dm_cache[domain])
+            if cache_key in self._vendor_dm_cache:
+                consider(self._vendor_dm_cache[cache_key])
                 return best
 
         vendors: list[tuple[str, Any]] = []
-        if self.getleads.enabled and self._allowed("getleads"):
+        if domain and self.getleads.enabled and self._allowed("getleads"):
             vendors.append(("getleads", self.getleads))
         if self.ai_ark.enabled and self._allowed("aiark"):
             vendors.append(("aiark", self.ai_ark))
-        if self.leadmagic.enabled and self._allowed("leadmagic"):
+        if domain and self.leadmagic.enabled and self._allowed("leadmagic"):
             vendors.append(("leadmagic", self.leadmagic))
 
         vendor_best: PersonHit | None = None
         vendor_rank = -1
         for tier, client in vendors:
             self._bump(tier, "calls")
-            people = client.find_people(
-                domain,
-                company_name=row.get("company_name") or "",
-                titles=self.target_titles,
-            )
+            if domain:
+                people = client.find_people(
+                    domain,
+                    company_name=company,
+                    titles=self.target_titles,
+                )
+            else:
+                people = client.find_people(
+                    domain,
+                    company_name=company,
+                    titles=self.target_titles,
+                    full_name=row.get("full_name") or "",
+                )
             picked = self._pick(people)
             if picked:
                 self._bump(tier, "dm_hits")
@@ -395,7 +547,7 @@ class Waterfall:
                     break
 
         with self._lock:
-            self._vendor_dm_cache[domain] = vendor_best
+            self._vendor_dm_cache[cache_key] = vendor_best
         return best
 
     def resolve_phone(
@@ -567,6 +719,7 @@ def _enrich_one_row(
                 row["linkedin_url"] = person.linkedin_url
             if person.phone and not row.get("phone"):
                 row["phone"] = person.phone
+            _fill_row_domain(row, email=person.email, raw=person.raw)
             if person.source_tier == "aiark":
                 pid = str((person.raw or {}).get("id") or "").strip()
                 if pid and not row.get("ai_ark_id"):
@@ -582,6 +735,7 @@ def _enrich_one_row(
             extra_phone = getattr(hit, "phone", "") or ""
             if extra_phone and not row.get("phone"):
                 row["phone"] = extra_phone
+            _fill_row_domain(row, email=email, raw=hit.raw)
 
     phone_hit = wf.resolve_phone(row, email=email)
     phone = (phone_hit.phone if phone_hit else "") or row.get("phone") or ""
@@ -665,6 +819,7 @@ def _result_payload(
         "emails_found": emails_found,
         "dms_found": dms_found,
         "phones_found": phones_found,
+        "modes": getattr(wf, "modes", None) or classify_rows([]),
         "tier_stats": dict(wf.tier_stats),
         "tier_breakdown": tier_breakdown,
         "need": need_norm,
@@ -690,6 +845,20 @@ def _result_payload(
     return out
 
 
+def _maybe_writeback(src: table_source.TableSource | None, item: dict[str, Any]) -> None:
+    if src is None:
+        return
+    email = item.get("email") or ""
+    table_source.writeback_result(
+        src,
+        key=item["row"].get("_source_key"),
+        status="found" if email else "not_found",
+        email=email,
+        email_status="found" if email else "not_found",
+        vendor=item.get("email_tier") or item.get("dm_tier") or "",
+    )
+
+
 def _enrich_waterfall_serial(
     parsed: list[dict[str, Any]],
     *,
@@ -701,6 +870,7 @@ def _enrich_waterfall_serial(
     write_supabase: bool,
     wf: Waterfall,
     progress_callback: ProgressCallback | None = None,
+    table_src: table_source.TableSource | None = None,
 ) -> dict[str, Any]:
     pending_fe: list[tuple[int, dict[str, Any]]] = []
     enriched: list[dict[str, Any]] = []
@@ -712,7 +882,7 @@ def _enrich_waterfall_serial(
             and not item["email"]
             and row["first_name"]
             and row["last_name"]
-            and row["domain"]
+            and (row["domain"] or row.get("company_name"))
             and wf.fullenrich.enabled
             and wf._allowed("fullenrich")
         ):
@@ -736,6 +906,7 @@ def _enrich_waterfall_serial(
                 wf._bump("fullenrich", "email_hits")
                 enriched[idx]["email"] = hit.email
                 enriched[idx]["email_tier"] = hit.source_tier
+                _fill_row_domain(enriched[idx]["row"], email=hit.email, raw=hit.raw)
                 if not enriched[idx].get("phone"):
                     phone_hit = wf.resolve_phone(enriched[idx]["row"], email=hit.email)
                     if phone_hit:
@@ -760,6 +931,7 @@ def _enrich_waterfall_serial(
         if item.get("phone"):
             phones_found += 1
         company, contact = _company_contact_rows(client, item)
+        _maybe_writeback(table_src, item)
         if write_supabase:
             companies_upserted += supabase_sync.upsert_companies(client, [company])
             if contact:
@@ -818,6 +990,7 @@ def _enrich_waterfall_parallel(
     write_supabase: bool,
     wf: Waterfall,
     progress_callback: ProgressCallback | None = None,
+    table_src: table_source.TableSource | None = None,
 ) -> dict[str, Any]:
     total = len(parsed)
     progress_lock = threading.Lock()
@@ -862,6 +1035,7 @@ def _enrich_waterfall_parallel(
             include_fullenrich=True,
         )
         company, contact = _company_contact_rows(client, item)
+        _maybe_writeback(table_src, item)
         upserted = 0
         written = 0
         if write_supabase:
@@ -911,7 +1085,7 @@ def _enrich_waterfall_parallel(
 
 
 def enrich_waterfall(
-    rows: Any,
+    rows: Any = None,
     *,
     client_tag: str,
     need: Need = "both",
@@ -921,9 +1095,17 @@ def enrich_waterfall(
     write_supabase: bool = True,
     parallel: bool = True,
     progress_callback: ProgressCallback | None = None,
+    source: Any = None,
+    source_table: str | None = None,
+    where: str | None = None,
+    estimate_only: bool = False,
+    writeback: bool | None = None,
 ) -> dict[str, Any]:
     """Walk paid vendors per row; upsert isolated client tables; return counts."""
-    client = get_client(client_tag)
+    client = ensure_client(
+        client_tag,
+        write_supabase=bool(write_supabase) and not estimate_only,
+    )
     max_tier_n = normalize_max_tier(max_tier)
     need_norm = (need or "both").strip().lower()
     if need_norm not in ("email", "dm", "both", "phone"):
@@ -935,8 +1117,33 @@ def enrich_waterfall(
     else:
         titles = parse_target_titles(target_titles, client)
 
-    parsed = [_norm_row(r) for r in _parse_rows(rows)]
-    parsed = [r for r in parsed if r.get("domain")]
+    merged = table_source.coerce_source(
+        source, source_table=source_table, where=where, writeback=writeback
+    )
+    has_rows = rows is not None and rows != ""
+    has_source = merged is not None
+    if has_rows and has_source:
+        raise ValueError("pass rows or source_table/source, not both")
+    if not has_rows and not has_source:
+        raise ValueError("rows or source_table is required")
+
+    table_src: table_source.TableSource | None = None
+    if has_source:
+        table_src = table_source.parse_source(merged)
+        if writeback is not None:
+            table_src.writeback = bool(writeback)
+        if estimate_only:
+            table_src.writeback = False
+        raw_rows = table_source.fetch_source_rows(table_src)
+    else:
+        raw_rows = _parse_rows(rows)
+
+    parsed = [_norm_row(r) for r in raw_rows]
+    if estimate_only:
+        return estimate_waterfall(
+            parsed, max_tier=max_tier_n, need=need_norm, client=client
+        )
+    parsed = [r for r in parsed if r.get("domain") or r.get("mode") == "name_company"]
     if not parsed:
         return {
             "rows_in": 0,
@@ -955,7 +1162,11 @@ def enrich_waterfall(
             "contacts_table": client.contacts_table,
             "target_titles": titles,
             "require_title_match": bool(require_title_match),
+            "modes": classify_rows([]),
         }
+
+    if table_src and table_src.writeback:
+        table_source.ensure_writeback_columns(table_src)
 
     wf = Waterfall(
         max_tier=max_tier_n,
@@ -963,6 +1174,7 @@ def enrich_waterfall(
         fallback_titles=client.fallback_titles,
         require_title_match=bool(require_title_match),
     )
+    wf.modes = classify_rows(parsed)
 
     runner = _enrich_waterfall_parallel if parallel else _enrich_waterfall_serial
     return runner(
@@ -975,4 +1187,5 @@ def enrich_waterfall(
         write_supabase=write_supabase,
         wf=wf,
         progress_callback=progress_callback,
+        table_src=table_src,
     )
