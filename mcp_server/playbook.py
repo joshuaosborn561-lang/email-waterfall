@@ -93,6 +93,16 @@ entirely — do not call and discard. Job results include `suppressed_by_need`
 counts and `estimate_only` quotes the email-only AI Ark rate (1.0, not 1.5).
 AI Ark People Search then export/single is one attempt and two vendor_calls.
 
+Worker pool: TIER_CONCURRENCY default 12, hard cap 32. Optional `concurrency`
+on enrich_waterfall overrides it. Optional `limit` slices the snapshot after
+the one source fetch. Workers never re query the source table.
+
+Errors (429, timeout, 5xx) are `errored`, not misses. Rows retry with backoff
+before they can become `none`. get_job_status surfaces `errored`,
+`requests_made`, `accepted`, `none`, and per tier `cost_usd` / `credits`.
+cancel_job drains the pool and flushes accumulated writeback. A flat
+`requests_made` for 5 minutes while running becomes status `stalled`.
+
 ## Input row shape
 domain (optional if name+company present), company_name, first_name, last_name,
 title, email, linkedin_url, phone / cellphone / mobile, place_id, city, state.

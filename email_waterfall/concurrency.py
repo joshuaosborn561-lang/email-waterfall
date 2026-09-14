@@ -14,9 +14,11 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import requests
+
+from email_waterfall.errors import VendorCallError
 
 TIER_ENV_KEYS: dict[str, str] = {
     "getleads": "GETLEADS_CONCURRENCY",
@@ -38,7 +40,17 @@ DEFAULT_VENDOR_LIMITS: dict[str, int] = {
 
 CROSS_PROCESS_TIERS = frozenset({"smartlead"})
 
-DEFAULT_COMPANY_CONCURRENCY = 40
+DEFAULT_COMPANY_CONCURRENCY = 12
+DEFAULT_JOB_CONCURRENCY = 12
+MAX_JOB_CONCURRENCY = 32
+WRITEBACK_BATCH = 200
+ROW_ERROR_RETRIES = 3
+
+_req_lock = threading.Lock()
+_requests_made = 0
+_last_progress_at = 0.0
+_active_tier = ""
+_throttle_hook: Callable[[], None] | None = None
 
 
 def _env_int(name: str, default: int) -> int:
@@ -51,8 +63,59 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def clamp_concurrency(value: int) -> int:
+    return max(1, min(MAX_JOB_CONCURRENCY, int(value)))
+
+
+def job_concurrency(override: int | None = None) -> int:
+    """Row worker pool size. TIER_CONCURRENCY default 12, hard cap 32."""
+    if override is not None:
+        return clamp_concurrency(override)
+    if (os.environ.get("TIER_CONCURRENCY") or "").strip():
+        return clamp_concurrency(_env_int("TIER_CONCURRENCY", DEFAULT_JOB_CONCURRENCY))
+    if (os.environ.get("COMPANY_CONCURRENCY") or "").strip():
+        return clamp_concurrency(_env_int("COMPANY_CONCURRENCY", DEFAULT_JOB_CONCURRENCY))
+    return DEFAULT_JOB_CONCURRENCY
+
+
 def company_concurrency() -> int:
-    return _env_int("COMPANY_CONCURRENCY", DEFAULT_COMPANY_CONCURRENCY)
+    return job_concurrency()
+
+
+def note_request(tier: str) -> None:
+    global _requests_made, _last_progress_at, _active_tier
+    with _req_lock:
+        _requests_made += 1
+        _last_progress_at = time.time()
+        _active_tier = tier
+
+
+def request_stats() -> dict[str, object]:
+    with _req_lock:
+        return {
+            "requests_made": _requests_made,
+            "last_progress_at": _last_progress_at,
+            "active_tier": _active_tier,
+        }
+
+
+def reset_request_stats() -> None:
+    global _requests_made, _last_progress_at, _active_tier
+    with _req_lock:
+        _requests_made = 0
+        _last_progress_at = 0.0
+        _active_tier = ""
+
+
+def set_throttle_hook(hook: Callable[[], None] | None) -> None:
+    global _throttle_hook
+    _throttle_hook = hook
+
+
+def notify_throttle() -> None:
+    hook = _throttle_hook
+    if hook is not None:
+        hook()
 
 
 def vendor_concurrency(tier: str) -> int:
@@ -156,6 +219,49 @@ def _retry_delay(attempt: int, response: requests.Response | None) -> float:
     return (2**attempt) + random.uniform(0, 0.25)
 
 
+class WorkerSlots:
+    """Bounded worker slots that shrink for a cooldown after a 429."""
+
+    def __init__(self, size: int) -> None:
+        self.size = clamp_concurrency(size)
+        self._sem = threading.Semaphore(self.size)
+        self._lock = threading.Lock()
+        self.effective = self.size
+
+    def acquire(self) -> None:
+        self._sem.acquire()
+
+    def release(self) -> None:
+        self._sem.release()
+
+    def shrink(self, seconds: float = 20.0) -> None:
+        with self._lock:
+            if self.effective <= 1:
+                return
+            if not self._sem.acquire(blocking=False):
+                return
+            self.effective -= 1
+        timer = threading.Timer(max(0.05, float(seconds)), self._restore)
+        timer.daemon = True
+        timer.start()
+
+    def _restore(self) -> None:
+        self._sem.release()
+        with self._lock:
+            if self.effective < self.size:
+                self.effective += 1
+
+
+def stall_seconds() -> float:
+    raw = (os.environ.get("STALL_SECONDS") or "").strip()
+    if raw:
+        try:
+            return max(0.05, float(raw))
+        except ValueError:
+            pass
+    return 300.0
+
+
 def request_with_retry(
     tier: str,
     method: str,
@@ -164,21 +270,35 @@ def request_with_retry(
     max_attempts: int | None = None,
     **kwargs: object,
 ) -> requests.Response | None:
-    """Acquire the shared vendor gate; retry 429/5xx with backoff + jitter."""
+    """Acquire the shared vendor gate, retry 429/5xx with backoff + jitter."""
     attempts = max_attempts if max_attempts is not None else (5 if tier == "smartlead" else 3)
     last: requests.Response | None = None
+    last_kind = "http"
     with vendor_gate.acquire(tier):
         for attempt in range(attempts):
             try:
+                note_request(tier)
                 last = requests.request(method, url, **kwargs)  # type: ignore[arg-type]
-            except requests.RequestException:
+            except requests.RequestException as exc:
+                last_kind = "timeout"
                 if attempt < attempts - 1:
                     time.sleep(_retry_delay(attempt, None))
                     continue
-                return None
-            if last.status_code == 429 or last.status_code >= 500:
+                raise VendorCallError(tier, "timeout", str(exc)) from exc
+            if last.status_code == 429:
+                last_kind = "throttle"
+                notify_throttle()
                 if attempt < attempts - 1:
                     time.sleep(_retry_delay(attempt, last))
                     continue
+                raise VendorCallError(tier, "throttle", "429")
+            if last.status_code >= 500:
+                last_kind = "http"
+                if attempt < attempts - 1:
+                    time.sleep(_retry_delay(attempt, last))
+                    continue
+                raise VendorCallError(tier, "http", f"status {last.status_code}")
             return last
+    if last is None:
+        raise VendorCallError(tier, last_kind, "no response")
     return last

@@ -23,7 +23,7 @@ mcp = MCPServer(
         "Not a Maps scraper or website crawler."
     ),
     instructions=INSTRUCTIONS,
-    version="1.3.2",
+    version="1.4.0",
 )
 
 
@@ -253,6 +253,21 @@ def get_job_status(job_id: str) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        title="Cancel a background job",
+        readOnlyHint=False,
+        openWorldHint=False,
+        destructiveHint=True,
+    )
+)
+def cancel_job(job_id: str) -> str:
+    """Cancel a running enrich_waterfall job. Workers drain and flush partial results."""
+    from mcp_server.jobs import cancel_job as _cancel
+
+    return _json(_cancel(job_id).to_public())
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         title="List background jobs",
         readOnlyHint=True,
         openWorldHint=False,
@@ -286,6 +301,8 @@ def enrich_waterfall(
     where: str = "",
     estimate_only: bool = False,
     writeback: bool = True,
+    concurrency: int = 0,
+    limit: int = 0,
 ) -> str:
     """Resolve DMs + work emails + cellphones via paid vendors; write public.{client}_*.
 
@@ -321,6 +338,8 @@ def enrich_waterfall(
     need='phone' never hits email finders. max_tier caps depth independently.
     max_tier = 'getleads' | 'smartlead' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
     (default 'leadmagic' / alias 'lm' — stops before Prospeo and FullEnrich).
+    concurrency = optional worker pool size (default TIER_CONCURRENCY=12, cap 32).
+    limit = optional max rows from the fetched snapshot (slice tests).
     """
     _ensure_repo_cwd()
     _reload_settings()
@@ -335,6 +354,7 @@ def enrich_waterfall(
 
     def _run_enrich(
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: Any = None,
     ) -> dict[str, Any]:
         return wf.enrich_waterfall(
             rows,
@@ -350,15 +370,21 @@ def enrich_waterfall(
             where=where or None,
             estimate_only=bool(estimate_only),
             writeback=bool(writeback) and not estimate_only,
+            concurrency=int(concurrency) if concurrency else None,
+            limit=int(limit) if limit else None,
+            cancel_event=cancel_event,
         )
 
     def _run(job: Any) -> dict[str, Any]:
-        from mcp_server.jobs import update_job_progress
+        from mcp_server.jobs import cancel_event_for, update_job_progress
 
         def on_progress(snapshot: dict[str, Any]) -> None:
             update_job_progress(job.id, snapshot)
 
-        return _run_enrich(progress_callback=on_progress)
+        return _run_enrich(
+            progress_callback=on_progress,
+            cancel_event=cancel_event_for(job.id),
+        )
 
     if estimate_only:
         return _json(_run_enrich())
