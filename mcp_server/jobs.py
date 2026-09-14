@@ -11,6 +11,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from email_waterfall.concurrency import stall_seconds
+from email_waterfall.errors import JobCancelled
+
 ROOT = Path(__file__).resolve().parent.parent
 JOBS_DIR = ROOT / "data" / "jobs"
 
@@ -19,7 +22,7 @@ JOBS_DIR = ROOT / "data" / "jobs"
 class Job:
     id: str
     kind: str
-    status: str  # queued | running | completed | failed
+    status: str
     created_at: float
     started_at: float | None = None
     finished_at: float | None = None
@@ -33,6 +36,7 @@ class Job:
 
 _lock = threading.Lock()
 _jobs: dict[str, Job] = {}
+_cancel_events: dict[str, threading.Event] = {}
 
 
 def _path(job_id: str) -> Path:
@@ -44,6 +48,15 @@ def _persist(job: Job) -> None:
     _path(job.id).write_text(
         json.dumps(job.to_public(), indent=2, default=str), encoding="utf-8"
     )
+
+
+def cancel_event_for(job_id: str) -> threading.Event:
+    with _lock:
+        ev = _cancel_events.get(job_id)
+        if ev is None:
+            ev = threading.Event()
+            _cancel_events[job_id] = ev
+        return ev
 
 
 def get_job(job_id: str) -> Job:
@@ -73,7 +86,7 @@ def list_jobs(limit: int = 20) -> list[Job]:
 
 
 def update_job_progress(job_id: str, snapshot: dict[str, Any]) -> None:
-    """Persist mid-run progress into job.result for get_job_status polling."""
+    """Persist mid run progress into job.result for get_job_status polling."""
     with _lock:
         job = _jobs.get(job_id)
         if job is None:
@@ -83,6 +96,42 @@ def update_job_progress(job_id: str, snapshot: dict[str, Any]) -> None:
                 return
         job.result = dict(snapshot)
     _persist(job)
+
+
+def cancel_job(job_id: str) -> Job:
+    """Ask a running job to drain workers and flush accumulated results."""
+    job = get_job(job_id)
+    cancel_event_for(job_id).set()
+    with _lock:
+        if job.status in ("queued", "running"):
+            job.status = "cancelled"
+            job.error = "cancelled by caller"
+            _persist(job)
+    return job
+
+
+def _stall_watch(job: Job) -> None:
+    last_seen: object = object()
+    last_change = time.time()
+    while True:
+        time.sleep(min(5.0, max(0.05, stall_seconds() / 6.0)))
+        with _lock:
+            if job.status not in ("running", "queued"):
+                return
+            made = (job.result or {}).get("requests_made")
+            tier = (job.result or {}).get("active_tier") or "enrich"
+        if made != last_seen:
+            last_seen = made
+            last_change = time.time()
+        elif time.time() - last_change >= stall_seconds():
+            with _lock:
+                if job.status == "running":
+                    job.status = "stalled"
+                    job.error = f"requests_made flat on {tier}"
+                    job.finished_at = time.time()
+                    _persist(job)
+            cancel_event_for(job.id).set()
+            return
 
 
 def start_job(
@@ -99,21 +148,38 @@ def start_job(
     )
     with _lock:
         _jobs[job.id] = job
+    cancel_event_for(job.id)
     _persist(job)
 
     def worker() -> None:
         job.status = "running"
         job.started_at = time.time()
         _persist(job)
+        threading.Thread(
+            target=_stall_watch, args=(job,), name=f"stall-{job.id}", daemon=True
+        ).start()
         try:
-            job.result = fn(job) or {}
-            job.status = "completed"
+            result = fn(job) or {}
+            job.result = result
+            if job.status == "stalled":
+                pass
+            elif cancel_event_for(job.id).is_set():
+                job.status = "cancelled"
+                job.error = job.error or "cancelled by caller"
+            else:
+                job.status = "completed"
+        except JobCancelled:
+            if job.status != "stalled":
+                job.status = "cancelled"
+                job.error = job.error or "cancelled by caller"
         except Exception as exc:  # noqa: BLE001
-            job.status = "failed"
-            job.error = f"{type(exc).__name__}: {exc}"
-            job.result = {"traceback": traceback.format_exc()[-4000:]}
+            if job.status not in ("stalled", "cancelled"):
+                job.status = "failed"
+                job.error = f"{type(exc).__name__}: {exc}"
+                job.result = {"traceback": traceback.format_exc()[-4000:]}
         finally:
-            job.finished_at = time.time()
+            if job.finished_at is None:
+                job.finished_at = time.time()
             _persist(job)
 
     threading.Thread(target=worker, name=f"mcp-job-{job.id}", daemon=True).start()

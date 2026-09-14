@@ -20,15 +20,25 @@ Writes to public.{client}_companies / public.{client}_contacts.
 from __future__ import annotations
 
 import json
+import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
 
 from . import source as table_source
 from . import supabase_sync
 from .clients import ClientConfig, ensure_client, parse_target_titles
-from .concurrency import company_concurrency
+from .concurrency import (
+    ROW_ERROR_RETRIES,
+    WRITEBACK_BATCH,
+    WorkerSlots,
+    job_concurrency,
+    request_stats,
+    reset_request_stats,
+    set_throttle_hook,
+)
+from .errors import JobCancelled, VendorCallError
 from .need import (
     CAP_EMAIL,
     CAP_PEOPLE,
@@ -74,6 +84,14 @@ CREDIT_PER_ATTEMPT: dict[str, float] = {
     "leadmagic": 1.0,
     "prospeo": 1.0,
     "fullenrich": 1.0,
+}
+TIER_COST_NOTES: dict[str, str] = {
+    "getleads": "credits counted from vendor_calls, no usd rate configured",
+    "smartlead": "included plan allotment",
+    "aiark": "credits counted from vendor_calls, no usd rate configured",
+    "leadmagic": "credits counted from vendor_calls, no usd rate configured",
+    "prospeo": "credits counted from vendor_calls, no usd rate configured",
+    "fullenrich": "credits counted from vendor_calls, no usd rate configured",
 }
 
 
@@ -864,14 +882,23 @@ def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]
     tier_breakdown: dict[str, dict[str, Any]] = {}
     for tier_name, stats in wf.tier_stats.items():
         allowed = tier_allowed(tier_name, max_tier_n) if tier_name in TIER_RANK else True
+        vendor_calls = int(stats.get("vendor_calls") or 0)
+        credits = vendor_calls * CREDIT_PER_ATTEMPT.get(tier_name, 1.0)
+        if stats.get("credits_used") is not None:
+            credits = float(stats.get("credits_used") or 0)
         row = {
             "attempts": int(stats.get("calls") or 0),
             "email_hits": int(stats.get("email_hits") or 0),
             "dm_hits": int(stats.get("dm_hits") or 0),
             "phone_hits": int(stats.get("phone_hits") or 0),
-            "vendor_calls": int(stats.get("vendor_calls") or 0),
+            "vendor_calls": vendor_calls,
             "vendor_hits": int(stats.get("vendor_hits") or 0),
             "allowed_by_max_tier": allowed,
+            "credits": credits,
+            "cost_usd": 0.0,
+            "cost_note": TIER_COST_NOTES.get(
+                tier_name, "credits counted from vendor_calls, no usd rate configured"
+            ),
             "estimated_cost_usd": 0.0,
         }
         if "credits_available" in stats:
@@ -899,8 +926,19 @@ def _result_payload(
     phones_found: int,
     companies_done: int | None = None,
     companies_total: int | None = None,
+    processed: int | None = None,
+    accepted: int | None = None,
+    rejected_by_gate: int = 0,
+    none: int = 0,
+    errored: int = 0,
+    concurrency: int | None = None,
+    cancelled: bool = False,
+    rows_fetched: int | None = None,
 ) -> dict[str, Any]:
     tier_breakdown = _tier_breakdown(wf, max_tier_n)
+    spent_usd = round(sum(float(t.get("cost_usd") or 0) for t in tier_breakdown.values()), 4)
+    stats = request_stats()
+    done = companies_done if companies_done is not None else processed
     out: dict[str, Any] = {
         "rows_in": parsed_count,
         "companies_upserted": companies_upserted,
@@ -920,6 +958,18 @@ def _result_payload(
         "contacts_table": client.contacts_table,
         "target_titles": titles,
         "require_title_match": bool(require_title_match),
+        "processed": int(done if done is not None else 0),
+        "accepted": int(accepted if accepted is not None else emails_found),
+        "rejected_by_gate": int(rejected_by_gate),
+        "none": int(none),
+        "errored": int(errored),
+        "requests_made": int(stats.get("requests_made") or 0),
+        "last_progress_at": stats.get("last_progress_at") or None,
+        "active_tier": stats.get("active_tier") or "",
+        "concurrency": concurrency,
+        "spent_usd": spent_usd,
+        "cancelled": bool(cancelled),
+        "rows_fetched": rows_fetched if rows_fetched is not None else parsed_count,
         "vendors_enabled": {
             "getleads": wf.getleads.enabled and wf._allowed("getleads"),
             "smartlead": wf.smartlead.enabled and wf._allowed("smartlead"),
@@ -937,17 +987,77 @@ def _result_payload(
 
 
 def _maybe_writeback(src: table_source.TableSource | None, item: dict[str, Any]) -> None:
-    if src is None:
+    if src is None or item.get("errored"):
         return
-    email = item.get("email") or ""
-    table_source.writeback_result(
-        src,
-        key=item["row"].get("_source_key"),
-        status="found" if email else "not_found",
-        email=email,
-        email_status="found" if email else "not_found",
-        vendor=item.get("email_tier") or item.get("dm_tier") or "",
-    )
+    table_source.writeback_results_batch(src, [item])
+
+
+def _blank_item(row: dict[str, Any], *, errored: bool = False) -> dict[str, Any]:
+    return {
+        "row": row,
+        "email": "",
+        "email_tier": "",
+        "dm_tier": "",
+        "person": None,
+        "phone": "",
+        "phone_tier": "",
+        "errored": errored,
+    }
+
+
+def _resolve_row_with_retry(
+    wf: Waterfall,
+    row: dict[str, Any],
+    *,
+    need_norm: str,
+    include_fullenrich: bool,
+    cancel_event: threading.Event | None,
+    slots: WorkerSlots | None,
+) -> dict[str, Any]:
+    last: VendorCallError | None = None
+    for attempt in range(ROW_ERROR_RETRIES):
+        if cancel_event is not None and cancel_event.is_set():
+            raise JobCancelled()
+        try:
+            item = _enrich_one_row(
+                wf, row, need_norm=need_norm, include_fullenrich=include_fullenrich
+            )
+            item["errored"] = False
+            return item
+        except VendorCallError as exc:
+            last = exc
+            if exc.kind == "throttle" and slots is not None:
+                slots.shrink()
+            if attempt < ROW_ERROR_RETRIES - 1:
+                time.sleep(min(8.0, 0.05 * (2**attempt)))
+    item = _blank_item(row, errored=True)
+    item["error_kind"] = last.kind if last else "http"
+    return item
+
+
+def _commit_items(
+    items: list[dict[str, Any]],
+    *,
+    client: ClientConfig,
+    write_supabase: bool,
+    table_src: table_source.TableSource | None,
+) -> tuple[int, int]:
+    upserted = 0
+    written = 0
+    table_source.writeback_results_batch(table_src, items)
+    if not write_supabase:
+        return upserted, written
+    for item in items:
+        if item.get("errored"):
+            continue
+        company, contact = _company_contact_rows(client, item)
+        upserted += supabase_sync.upsert_companies(client, [company])
+        if contact:
+            if contact.get("email"):
+                written += supabase_sync.insert_contacts_ignore_conflict(client, [contact])
+            else:
+                written += supabase_sync.insert_contacts(client, [contact])
+    return upserted, written
 
 
 def _enrich_waterfall_serial(
@@ -962,14 +1072,33 @@ def _enrich_waterfall_serial(
     wf: Waterfall,
     progress_callback: ProgressCallback | None = None,
     table_src: table_source.TableSource | None = None,
+    cancel_event: threading.Event | None = None,
+    concurrency: int = 1,
+    rows_fetched: int | None = None,
 ) -> dict[str, Any]:
     pending_fe: list[tuple[int, dict[str, Any]]] = []
     enriched: list[dict[str, Any]] = []
+    errored = 0
 
     for idx, row in enumerate(parsed):
-        item = _enrich_one_row(wf, row, need_norm=need_norm, include_fullenrich=False)
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        try:
+            item = _resolve_row_with_retry(
+                wf,
+                row,
+                need_norm=need_norm,
+                include_fullenrich=False,
+                cancel_event=cancel_event,
+                slots=None,
+            )
+        except JobCancelled:
+            break
+        if item.get("errored"):
+            errored += 1
         if (
             allows(need_norm, CAP_EMAIL)
+            and not item.get("errored")
             and not item["email"]
             and row["first_name"]
             and row["last_name"]
@@ -1021,25 +1150,28 @@ def _enrich_waterfall_serial(
     emails_found = 0
     dms_found = 0
     phones_found = 0
+    none = 0
 
+    pending: list[dict[str, Any]] = []
     for n, item in enumerate(enriched, start=1):
-        if item["email"]:
+        if item.get("errored"):
+            pass
+        elif item["email"]:
             emails_found += 1
+        else:
+            none += 1
         if item["dm_tier"]:
             dms_found += 1
         if item.get("phone"):
             phones_found += 1
-        company, contact = _company_contact_rows(client, item)
-        _maybe_writeback(table_src, item)
-        if write_supabase:
-            companies_upserted += supabase_sync.upsert_companies(client, [company])
-            if contact:
-                if contact.get("email"):
-                    contacts_written += supabase_sync.insert_contacts_ignore_conflict(
-                        client, [contact]
-                    )
-                else:
-                    contacts_written += supabase_sync.insert_contacts(client, [contact])
+        pending.append(item)
+        if len(pending) >= WRITEBACK_BATCH:
+            u, w = _commit_items(
+                pending, client=client, write_supabase=write_supabase, table_src=table_src
+            )
+            companies_upserted += u
+            contacts_written += w
+            pending = []
         if progress_callback:
             progress_callback(
                 _result_payload(
@@ -1057,8 +1189,21 @@ def _enrich_waterfall_serial(
                     phones_found=phones_found,
                     companies_done=n,
                     companies_total=len(parsed),
+                    processed=n,
+                    accepted=emails_found,
+                    none=none,
+                    errored=errored,
+                    concurrency=concurrency,
+                    cancelled=bool(cancel_event and cancel_event.is_set()),
+                    rows_fetched=rows_fetched,
                 )
             )
+    if pending:
+        u, w = _commit_items(
+            pending, client=client, write_supabase=write_supabase, table_src=table_src
+        )
+        companies_upserted += u
+        contacts_written += w
 
     return _result_payload(
         parsed_count=len(parsed),
@@ -1073,8 +1218,15 @@ def _enrich_waterfall_serial(
         emails_found=emails_found,
         dms_found=dms_found,
         phones_found=phones_found,
-        companies_done=len(parsed),
+        companies_done=len(enriched),
         companies_total=len(parsed),
+        processed=len(enriched),
+        accepted=emails_found,
+        none=none,
+        errored=errored,
+        concurrency=concurrency,
+        cancelled=bool(cancel_event and cancel_event.is_set()),
+        rows_fetched=rows_fetched,
     )
 
 
@@ -1090,97 +1242,137 @@ def _enrich_waterfall_parallel(
     wf: Waterfall,
     progress_callback: ProgressCallback | None = None,
     table_src: table_source.TableSource | None = None,
+    cancel_event: threading.Event | None = None,
+    concurrency: int | None = None,
+    rows_fetched: int | None = None,
 ) -> dict[str, Any]:
+    """Worker pool over the fixed in memory snapshot. Never re queries the source."""
     total = len(parsed)
-    progress_lock = threading.Lock()
+    workers = min(job_concurrency(concurrency), total) if total else 1
+    slots = WorkerSlots(workers)
+    set_throttle_hook(slots.shrink)
+    work_q: queue.Queue[dict[str, Any]] = queue.Queue()
+    for row in parsed:
+        work_q.put(row)
+    items_lock = threading.Lock()
+    items: list[dict[str, Any]] = []
     counters = {
-        "companies_done": 0,
         "companies_upserted": 0,
         "contacts_written": 0,
         "emails_found": 0,
         "dms_found": 0,
         "phones_found": 0,
+        "errored": 0,
+        "none": 0,
+        "flushed": 0,
     }
 
-    def _report() -> None:
-        if not progress_callback:
-            return
-        with progress_lock:
-            progress_callback(
-                _result_payload(
-                    parsed_count=total,
-                    client=client,
-                    need_norm=need_norm,
-                    max_tier_n=max_tier_n,
-                    titles=titles,
-                    require_title_match=require_title_match,
-                    wf=wf,
-                    companies_upserted=counters["companies_upserted"],
-                    contacts_written=counters["contacts_written"],
-                    emails_found=counters["emails_found"],
-                    dms_found=counters["dms_found"],
-                    phones_found=counters["phones_found"],
-                    companies_done=counters["companies_done"],
-                    companies_total=total,
-                )
+    def _snapshot_payload() -> dict[str, Any]:
+        with items_lock:
+            done = len(items)
+            return _result_payload(
+                parsed_count=total,
+                client=client,
+                need_norm=need_norm,
+                max_tier_n=max_tier_n,
+                titles=titles,
+                require_title_match=require_title_match,
+                wf=wf,
+                companies_upserted=counters["companies_upserted"],
+                contacts_written=counters["contacts_written"],
+                emails_found=counters["emails_found"],
+                dms_found=counters["dms_found"],
+                phones_found=counters["phones_found"],
+                companies_done=done,
+                companies_total=total,
+                processed=done,
+                accepted=counters["emails_found"],
+                none=counters["none"],
+                errored=counters["errored"],
+                concurrency=workers,
+                cancelled=bool(cancel_event and cancel_event.is_set()),
+                rows_fetched=rows_fetched,
             )
 
-    def _process_row(row: dict[str, Any]) -> dict[str, Any]:
-        row_copy = dict(row)
-        item = _enrich_one_row(
-            wf,
-            row_copy,
-            need_norm=need_norm,
-            include_fullenrich=True,
+    def _report() -> None:
+        if progress_callback:
+            progress_callback(_snapshot_payload())
+
+    def _tally(item: dict[str, Any]) -> None:
+        if item.get("errored"):
+            counters["errored"] += 1
+        elif item.get("email"):
+            counters["emails_found"] += 1
+        else:
+            counters["none"] += 1
+        if item.get("dm_tier"):
+            counters["dms_found"] += 1
+        if item.get("phone"):
+            counters["phones_found"] += 1
+
+    def _flush_from(start: int) -> int:
+        with items_lock:
+            chunk = items[start:]
+        if not chunk:
+            return start
+        u, w = _commit_items(
+            chunk, client=client, write_supabase=write_supabase, table_src=table_src
         )
-        company, contact = _company_contact_rows(client, item)
-        _maybe_writeback(table_src, item)
-        upserted = 0
-        written = 0
-        if write_supabase:
-            upserted = supabase_sync.upsert_companies(client, [company])
-            if contact:
-                if contact.get("email"):
-                    written = supabase_sync.insert_contacts_ignore_conflict(
-                        client, [contact]
-                    )
-                else:
-                    written = supabase_sync.insert_contacts(client, [contact])
-        with progress_lock:
-            counters["companies_done"] += 1
-            counters["companies_upserted"] += upserted
-            counters["contacts_written"] += written
-            if item["email"]:
-                counters["emails_found"] += 1
-            if item["dm_tier"]:
-                counters["dms_found"] += 1
-            if item.get("phone"):
-                counters["phones_found"] += 1
+        with items_lock:
+            counters["companies_upserted"] += u
+            counters["contacts_written"] += w
+        return start + len(chunk)
+
+    def _worker() -> None:
+        while cancel_event is None or not cancel_event.is_set():
+            try:
+                row = work_q.get_nowait()
+            except queue.Empty:
+                return
+            slots.acquire()
+            try:
+                item = _resolve_row_with_retry(
+                    wf,
+                    dict(row),
+                    need_norm=need_norm,
+                    include_fullenrich=True,
+                    cancel_event=cancel_event,
+                    slots=slots,
+                )
+                with items_lock:
+                    items.append(item)
+                    _tally(item)
+                _report()
+            except JobCancelled:
+                return
+            finally:
+                slots.release()
+                work_q.task_done()
+
+    threads = [
+        threading.Thread(target=_worker, name=f"eworker{i}", daemon=True)
+        for i in range(workers)
+    ]
+    try:
+        for t in threads:
+            t.start()
+        flushed = 0
+        while any(t.is_alive() for t in threads):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            time.sleep(0.05)
+            with items_lock:
+                pending_n = len(items) - flushed
+            if pending_n >= WRITEBACK_BATCH:
+                flushed = _flush_from(flushed)
+        deadline = time.time() + 25.0
+        for t in threads:
+            t.join(max(0.01, deadline - time.time()))
+        flushed = _flush_from(flushed)
         _report()
-        return item
-
-    workers = min(company_concurrency(), total)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_process_row, row) for row in parsed]
-        for fut in as_completed(futures):
-            fut.result()
-
-    return _result_payload(
-        parsed_count=total,
-        client=client,
-        need_norm=need_norm,
-        max_tier_n=max_tier_n,
-        titles=titles,
-        require_title_match=require_title_match,
-        wf=wf,
-        companies_upserted=counters["companies_upserted"],
-        contacts_written=counters["contacts_written"],
-        emails_found=counters["emails_found"],
-        dms_found=counters["dms_found"],
-        phones_found=counters["phones_found"],
-        companies_done=total,
-        companies_total=total,
-    )
+        return _snapshot_payload()
+    finally:
+        set_throttle_hook(None)
 
 
 def enrich_waterfall(
@@ -1199,8 +1391,14 @@ def enrich_waterfall(
     where: str | None = None,
     estimate_only: bool = False,
     writeback: bool | None = None,
+    concurrency: int | None = None,
+    limit: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
-    """Walk paid vendors per row; upsert isolated client tables; return counts."""
+    """Walk paid vendors per row; upsert isolated client tables; return counts.
+
+    Rows are fetched once into a snapshot. Workers never re query the source.
+    """
     client = ensure_client(
         client_tag,
         write_supabase=bool(write_supabase) and not estimate_only,
@@ -1234,8 +1432,11 @@ def enrich_waterfall(
         raw_rows = table_source.fetch_source_rows(table_src)
     else:
         raw_rows = _parse_rows(rows)
+    if limit is not None:
+        raw_rows = raw_rows[: max(0, int(limit))]
 
     parsed = [_norm_row(r) for r in raw_rows]
+    rows_fetched = len(parsed)
     if estimate_only:
         return estimate_waterfall(
             parsed, max_tier=max_tier_n, need=need_norm, client=client
@@ -1262,6 +1463,15 @@ def enrich_waterfall(
             "target_titles": titles,
             "require_title_match": bool(require_title_match),
             "modes": classify_rows([]),
+            "processed": 0,
+            "accepted": 0,
+            "rejected_by_gate": 0,
+            "none": 0,
+            "errored": 0,
+            "requests_made": 0,
+            "spent_usd": 0.0,
+            "concurrency": job_concurrency(concurrency),
+            "rows_fetched": rows_fetched,
         }
 
     if table_src and table_src.writeback:
@@ -1275,6 +1485,7 @@ def enrich_waterfall(
         need=need_norm,
     )
     wf.modes = classify_rows(parsed)
+    reset_request_stats()
 
     runner = _enrich_waterfall_parallel if parallel else _enrich_waterfall_serial
     return runner(
@@ -1288,4 +1499,7 @@ def enrich_waterfall(
         wf=wf,
         progress_callback=progress_callback,
         table_src=table_src,
+        cancel_event=cancel_event,
+        concurrency=job_concurrency(concurrency),
+        rows_fetched=rows_fetched,
     )

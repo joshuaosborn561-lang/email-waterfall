@@ -99,6 +99,8 @@ Richer `source` object still works:
 
 Smartlead 429 / rate-limit backs off and retries. It does not set `credits_exhausted` while used is still below total. Finder calls share one process-wide semaphore (default `SMARTLEAD_CONCURRENCY=3`), including across background jobs.
 
+Row workers use `TIER_CONCURRENCY` (default 12, cap 32). Pass `concurrency` on `enrich_waterfall` to override. `limit` slices the fetched snapshot (never re queries the source). `cancel_job` stops a run and flushes partial writeback. `errored` is distinct from a miss; 429 shrinks the pool for a cooldown. A flat `requests_made` for 5 minutes marks the job `stalled`. Every tier object includes `credits`, `cost_usd`, and `cost_note` (Smartlead is an included plan allotment; other tiers count credits and report no usd rate unless configured).
+
 `estimate_only=true` returns row counts per mode, the tiers each mode will touch, and a per-vendor credit estimate that respects `need` (email-only AI Ark rate, plus `suppressed_by_need`). Zero spend. Required before any paid source run.
 
 Inline `rows` still works as before (domain and/or name+company). Response is **counts / job_id / cost only** — never row payloads. Long HTTP runs return `job_id` — poll `get_job_status`.

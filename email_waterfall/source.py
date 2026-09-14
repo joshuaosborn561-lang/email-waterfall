@@ -627,3 +627,48 @@ def writeback_result(
         prefer="return=minimal",
         extra_headers=_profile_headers(src.schema),
     )
+
+
+def writeback_results_batch(
+    src: TableSource | None,
+    items: list[dict[str, Any]],
+    *,
+    chunk_size: int = 200,
+) -> int:
+    """Flush source writeback in id keyed chunks. Skips errored rows.
+
+    Does not null skip_* or exclusion columns. Only resolution fields already
+    handled by writeback_result are sent.
+    """
+    if src is None or not items:
+        return 0
+    from email_waterfall.concurrency import WRITEBACK_BATCH
+
+    size = max(100, min(250, int(chunk_size or WRITEBACK_BATCH)))
+    written = 0
+    batch: list[dict[str, Any]] = []
+    for item in items:
+        if item.get("errored"):
+            continue
+        batch.append(item)
+        if len(batch) >= size:
+            written += _flush_writeback_chunk(src, batch)
+            batch = []
+    if batch:
+        written += _flush_writeback_chunk(src, batch)
+    return written
+
+
+def _flush_writeback_chunk(src: TableSource, chunk: list[dict[str, Any]]) -> int:
+    n = 0
+    for item in chunk:
+        writeback_result(
+            src,
+            key=item.get("row", {}).get("_source_key"),
+            status="found" if item.get("email") else "not_found",
+            email=item.get("email") or "",
+            email_status="found" if item.get("email") else "not_found",
+            vendor=item.get("email_tier") or item.get("dm_tier") or "",
+        )
+        n += 1
+    return n

@@ -16,6 +16,7 @@ def test_tool_names() -> None:
     assert "enrich_waterfall" in names
     assert "health" in names
     assert "get_job_status" in names
+    assert "cancel_job" in names
     assert "describe_client" in names
     assert "ensure_client" in names
     assert "list_clients" in names
@@ -42,4 +43,6 @@ def test_enrich_waterfall_has_source_and_estimate_only() -> None:
     assert "where" in params
     assert "estimate_only" in params
     assert "writeback" in params
+    assert "concurrency" in params
+    assert "limit" in params
     assert params["rows"].default is None
