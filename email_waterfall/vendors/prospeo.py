@@ -14,6 +14,7 @@ from email_waterfall.config import settings
 from email_waterfall.need import CAP_EMAIL, CAP_PHONE, assert_capability
 
 from .base import EmailHit, PhoneHit
+from .errors import record_response_failure
 
 
 class ProspeoClient:
@@ -25,6 +26,7 @@ class ProspeoClient:
         self.timeout = timeout
         self.calls = 0
         self.hits = 0
+        self.errors = 0
 
     @property
     def enabled(self) -> bool:
@@ -80,9 +82,10 @@ class ProspeoClient:
             CAP_EMAIL, vendor=self.tier, endpoint="POST /enrich-person"
         )
         self.calls += 1
+        url = f"{self.base_url}/enrich-person"
         r = http_client.post(
             self.tier,
-            f"{self.base_url}/enrich-person",
+            url,
             json={
                 "only_verified_email": True,
                 "enrich_mobile": False,
@@ -92,15 +95,18 @@ class ProspeoClient:
             timeout=self.timeout,
         )
         if r is None:
+            record_response_failure(self, url, None)
             return None
         try:
             body: Any = r.json()
         except ValueError:
+            record_response_failure(self, url, r, error="non-json")
             return None
 
         if not isinstance(body, dict):
             return None
         if r.status_code >= 400 or body.get("error") is True:
+            record_response_failure(self, url, r)
             return None
 
         person = body.get("person") if isinstance(body.get("person"), dict) else {}
@@ -163,9 +169,10 @@ class ProspeoClient:
             CAP_PHONE, vendor=self.tier, endpoint="POST /enrich-person enrich_mobile"
         )
         self.calls += 1
+        url = f"{self.base_url}/enrich-person"
         r = http_client.post(
             self.tier,
-            f"{self.base_url}/enrich-person",
+            url,
             json={
                 "only_verified_email": False,
                 "enrich_mobile": True,
@@ -175,14 +182,17 @@ class ProspeoClient:
             timeout=self.timeout,
         )
         if r is None:
+            record_response_failure(self, url, None)
             return None
         try:
             body: Any = r.json()
         except ValueError:
+            record_response_failure(self, url, r, error="non-json")
             return None
         if not isinstance(body, dict):
             return None
         if r.status_code >= 400 or body.get("error") is True:
+            record_response_failure(self, url, r)
             return None
 
         person = body.get("person") if isinstance(body.get("person"), dict) else {}

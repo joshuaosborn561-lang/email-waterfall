@@ -1,0 +1,6 @@
+{
+  "generated_by": "scripts/getleads_auth.py",
+  "status": "not_yet_fetched",
+  "note": "Run `python scripts/getleads_auth.py` locally. Tool names must come from a live tools/list; do not guess them.",
+  "tools": []
+}

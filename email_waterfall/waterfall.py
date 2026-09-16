@@ -176,7 +176,7 @@ def _norm_row(r: dict[str, Any]) -> dict[str, Any]:
 
 
 def _empty_stats() -> dict[str, int]:
-    return {"calls": 0, "email_hits": 0, "dm_hits": 0, "phone_hits": 0}
+    return {"calls": 0, "email_hits": 0, "dm_hits": 0, "phone_hits": 0, "errors": 0}
 
 
 def _domain_from_email(email: str) -> str:
@@ -842,6 +842,25 @@ def _enrich_one_row(
         }
 
 
+def _int_attr(obj: Any, name: str) -> int:
+    val = getattr(obj, name, 0)
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _tier_warnings(tier_stats: dict[str, dict[str, Any]]) -> list[str]:
+    """Surface a tier that is failing, not merely missing. 0 hits + 2000 errors must not look quiet."""
+    warnings: list[str] = []
+    for name, stats in tier_stats.items():
+        calls = int(stats.get("vendor_calls") or stats.get("calls") or 0)
+        errors = int(stats.get("errors") or 0)
+        if calls >= 10 and errors * 2 > calls:
+            warnings.append(name)
+    return warnings
+
+
 def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]:
     for name, vendor in (
         ("getleads", wf.getleads),
@@ -851,8 +870,9 @@ def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]
         ("prospeo", wf.prospeo),
         ("fullenrich", wf.fullenrich),
     ):
-        wf.tier_stats[name]["vendor_calls"] = getattr(vendor, "calls", 0)
-        wf.tier_stats[name]["vendor_hits"] = getattr(vendor, "hits", 0)
+        wf.tier_stats[name]["vendor_calls"] = _int_attr(vendor, "calls")
+        wf.tier_stats[name]["vendor_hits"] = _int_attr(vendor, "hits")
+        wf.tier_stats[name]["errors"] = _int_attr(vendor, "errors")
         snap = getattr(vendor, "credit_snapshot", None)
         if callable(snap):
             credits = snap()
@@ -871,6 +891,7 @@ def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]
             "phone_hits": int(stats.get("phone_hits") or 0),
             "vendor_calls": int(stats.get("vendor_calls") or 0),
             "vendor_hits": int(stats.get("vendor_hits") or 0),
+            "errors": int(stats.get("errors") or 0),
             "allowed_by_max_tier": allowed,
             "estimated_cost_usd": 0.0,
         }
@@ -901,6 +922,7 @@ def _result_payload(
     companies_total: int | None = None,
 ) -> dict[str, Any]:
     tier_breakdown = _tier_breakdown(wf, max_tier_n)
+    warnings = _tier_warnings(wf.tier_stats)
     out: dict[str, Any] = {
         "rows_in": parsed_count,
         "companies_upserted": companies_upserted,
@@ -911,6 +933,7 @@ def _result_payload(
         "modes": getattr(wf, "modes", None) or classify_rows([]),
         "tier_stats": dict(wf.tier_stats),
         "tier_breakdown": tier_breakdown,
+        "warnings": warnings,
         "need": need_norm,
         "need_capabilities": sorted(capabilities(need_norm)),
         "suppressed_by_need": dict(getattr(wf, "suppressed_by_need", {}) or {}),

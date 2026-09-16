@@ -23,7 +23,7 @@ mcp = MCPServer(
         "Not a Maps scraper or website crawler."
     ),
     instructions=INSTRUCTIONS,
-    version="1.3.2",
+    version="1.4.0",
 )
 
 
@@ -94,6 +94,7 @@ def health() -> str:
     _reload_settings()
     from email_waterfall.clients import list_registered_clients
     from email_waterfall.config import settings
+    from email_waterfall.vendors.getleads import GetLeadsClient
 
     return _json(
         {
@@ -104,7 +105,7 @@ def health() -> str:
             "supabase_configured": settings.supabase_configured,
             "supabase_url": settings.supabase_url or None,
             "vendors": {
-                "getleads": bool(settings.getleads_api_key),
+                "getleads": GetLeadsClient().health_snapshot(),
                 "smartlead": bool(settings.smartlead_api_key),
                 "aiark": bool(settings.ai_ark_api_key),
                 "leadmagic": bool(settings.leadmagic_api_key),
@@ -263,6 +264,121 @@ def list_background_jobs(limit: int = 20) -> str:
     from mcp_server.jobs import list_jobs
 
     return _json([j.to_public() for j in list_jobs(limit=limit)])
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Search getleads for new leads (ICP)",
+        readOnlyHint=False,
+        openWorldHint=True,
+        destructiveHint=False,
+    )
+)
+def getleads_search(
+    filters: dict[str, Any] | None = None,
+    page: int = 0,
+    size: int = 100,
+    client_tag: str = "",
+    write: bool = False,
+) -> str:
+    """Discover leads via the getleads MCP people/lead search tool.
+
+    Returns counts and the first N compact rows (name, title, company, domain,
+    linkedin, state, email yes/no, phone yes/no). Never raw payloads.
+
+    Pass `filters` using the live field names from `filter_schema` (copied from
+    getleads tools/list). Typical ICP: geography + industry + seniority +
+    headcount + title.
+
+    write=true with client_tag upserts public.{tag}_wf_companies / _wf_contacts
+    with source_tool='getleads_search'.
+    """
+    _ensure_repo_cwd()
+    _reload_settings()
+    from email_waterfall.clients import ensure_client
+    from email_waterfall.supabase_sync import (
+        company_row,
+        contact_row,
+        insert_contacts,
+        insert_contacts_ignore_conflict,
+        upsert_companies,
+    )
+    from email_waterfall.vendors.getleads import GetLeadsClient, compact_person
+
+    client = GetLeadsClient()
+    size_n = max(1, min(int(size or 100), 100))
+    page_n = max(0, int(page or 0))
+    result = client.search_people(dict(filters or {}), page=page_n, size=size_n)
+    people = result.get("people") or []
+    compact = [compact_person(p) for p in people]
+    preview_n = min(20, len(compact))
+    companies_upserted = 0
+    contacts_written = 0
+    if write:
+        tag = (client_tag or "").strip()
+        if not tag:
+            raise ValueError("client_tag is required when write=true")
+        cfg = ensure_client(tag, write_supabase=True)
+        companies = []
+        contacts = []
+        for person, row in zip(people, compact):
+            domain = (row.get("domain") or "").strip().lower()
+            if not domain:
+                continue
+            companies.append(
+                company_row(
+                    client_tag=cfg.tag,
+                    domain=domain,
+                    company_name=row.get("company") or "",
+                    source="getleads_search",
+                    address_state=row.get("state") or "",
+                    dm_source_tier="getleads",
+                    source_tier={"dm": "getleads"},
+                    dm_lookup_status="found",
+                )
+            )
+            contacts.append(
+                contact_row(
+                    client_tag=cfg.tag,
+                    domain=domain,
+                    first_name=person.first_name,
+                    last_name=person.last_name,
+                    job_title=person.title,
+                    email=person.email,
+                    email_status="found" if person.email else "",
+                    cellphone=person.phone,
+                    linkedin_url=person.linkedin_url,
+                    contact_state=row.get("state") or "",
+                    source_tool="getleads_search",
+                    source_tier="getleads",
+                    confidence=0.7 if person.email or person.phone else 0.4,
+                )
+            )
+        if companies:
+            companies_upserted = upsert_companies(cfg, companies)
+        with_email = [c for c in contacts if c.get("email")]
+        without = [c for c in contacts if not c.get("email")]
+        if with_email:
+            contacts_written += insert_contacts_ignore_conflict(cfg, with_email)
+        if without:
+            contacts_written += insert_contacts(cfg, without)
+
+    return _json(
+        {
+            "total": result.get("total"),
+            "next_page": result.get("next_page"),
+            "returned": len(compact),
+            "email_present": sum(1 for r in compact if r.get("email")),
+            "phone_present": sum(1 for r in compact if r.get("phone")),
+            "preview": compact[:preview_n],
+            "filter_schema": client.search_filter_schema(),
+            "errors": client.errors,
+            "write": bool(write),
+            "client_tag": (client_tag or "").strip() or None,
+            "companies_upserted": companies_upserted,
+            "contacts_written": contacts_written,
+        }
+    )
 
 
 @mcp.tool(

@@ -1,0 +1,44 @@
+{
+  "note": "Schema fixtures for mapper tests. Live catalog is written by scripts/getleads_auth.py into docs/getleads_tools.json. Do not treat these names as the production getleads tools/list.",
+  "tools": [
+    {
+      "name": "find_work_email",
+      "description": "Find a work email for this name and company domain",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "firstName": {"type": "string"},
+          "lastName": {"type": "string"},
+          "companyDomain": {"type": "string"}
+        }
+      }
+    },
+    {
+      "name": "people_at_company",
+      "description": "List people at a company by domain filtered by title",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "domain": {"type": "string"},
+          "job_titles": {"type": "array"}
+        }
+      }
+    },
+    {
+      "name": "search_leads",
+      "description": "Search leads by industry, location, seniority, and headcount",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "industry": {"type": "string"},
+          "location": {"type": "array"},
+          "seniority": {"type": "string"},
+          "headcount": {"type": "string"},
+          "title": {"type": "string"},
+          "page": {"type": "integer"},
+          "limit": {"type": "integer"}
+        }
+      }
+    }
+  ]
+}

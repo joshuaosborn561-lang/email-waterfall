@@ -24,10 +24,10 @@ class Settings:
     supabase_url: str
     supabase_service_role_key: str
     supabase_anon_key: str
-    getleads_api_key: str
-    getleads_base_url: str
-    getleads_find_email_path: str
-    getleads_people_path: str
+    getleads_mcp_url: str
+    getleads_oauth_issuer: str
+    getleads_client_id: str
+    getleads_refresh_token: str
     ai_ark_api_key: str
     leadmagic_api_key: str
     prospeo_api_key: str
@@ -49,10 +49,14 @@ def load_settings() -> Settings:
         supabase_url=_env("SUPABASE_URL", DEFAULT_SUPABASE_URL).rstrip("/"),
         supabase_service_role_key=_env("SUPABASE_SERVICE_ROLE_KEY"),
         supabase_anon_key=_env("SUPABASE_ANON_KEY"),
-        getleads_api_key=_env("GETLEADS_API_KEY"),
-        getleads_base_url=_env("GETLEADS_BASE_URL", "https://app.getleads.io/api").rstrip("/"),
-        getleads_find_email_path=_env("GETLEADS_FIND_EMAIL_PATH", "/find-email"),
-        getleads_people_path=_env("GETLEADS_PEOPLE_PATH", "/people"),
+        getleads_mcp_url=_env(
+            "GETLEADS_MCP_URL", "https://app.getleads.io/api/mcp"
+        ).rstrip("/"),
+        getleads_oauth_issuer=_env(
+            "GETLEADS_OAUTH_ISSUER", "https://app.getleads.io"
+        ).rstrip("/"),
+        getleads_client_id=_env("GETLEADS_CLIENT_ID"),
+        getleads_refresh_token=_env("GETLEADS_REFRESH_TOKEN"),
         ai_ark_api_key=_env("AI_ARK_API_KEY") or _env("AIARK_API_KEY"),
         leadmagic_api_key=_env("LEADMAGIC_API_KEY") or _env("LEADMAGIC_KEY"),
         prospeo_api_key=_env("PROSPEO_API_KEY"),

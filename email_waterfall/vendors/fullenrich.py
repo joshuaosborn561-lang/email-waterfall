@@ -10,6 +10,7 @@ from email_waterfall.config import settings
 from email_waterfall.need import CAP_EMAIL, assert_capability
 
 from .base import EmailHit
+from .errors import record_response_failure
 
 
 class FullEnrichClient:
@@ -22,6 +23,7 @@ class FullEnrichClient:
         self.calls = 0
         self.hits = 0
         self.credits_used = 0
+        self.errors = 0
 
     @property
     def enabled(self) -> bool:
@@ -97,20 +99,24 @@ class FullEnrichClient:
             return [None] * len(rows)
 
         self.calls += 1
+        url = f"{self.base_url}/contact/enrich/bulk"
         r = http_client.post(
             self.tier,
-            f"{self.base_url}/contact/enrich/bulk",
+            url,
             json={"name": name, "data": data},
             headers=self._headers(),
             timeout=self.timeout,
         )
         if r is None:
+            record_response_failure(self, url, None)
             return [None] * len(rows)
         try:
             if r.status_code >= 400:
+                record_response_failure(self, url, r)
                 return [None] * len(rows)
             accepted = r.json()
         except ValueError:
+            record_response_failure(self, url, r, error="non-json")
             return [None] * len(rows)
 
         enrichment_id = (

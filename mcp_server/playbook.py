@@ -33,6 +33,8 @@ Never omit `client_tag`. Never write to a shared contacts table.
 3. For any paid source run, call `estimate_only=true` first.
 4. If the tool returns `job_id`, poll `get_job_status` until completed/failed.
 5. Report counts / cost only. Do not dump contact payloads.
+6. To *find* new leads (not enrich a table you already have), use
+   `getleads_search` with the live `filter_schema` field names.
 
 ## Table source
 Maps-scraper style params, mutually exclusive with `rows`:
@@ -57,10 +59,16 @@ verbatim. When a tier returns an email, its domain is written back for later
 tiers.
 
 ## Tiers
-getleads → Smartlead (included plan email finder) → AI Ark → LeadMagic →
-Prospeo → FullEnrich.
+getleads (OAuth MCP) → Smartlead (included plan email finder) → AI Ark →
+LeadMagic → Prospeo → FullEnrich.
 Default max_tier is **leadmagic** (alias `lm`). Prospeo and FullEnrich do not
 run unless you raise max_tier.
+
+getleads has no REST API and no API key. Bootstrap with
+`python scripts/getleads_auth.py`. Discovery of new leads (geo + industry +
+seniority + headcount) is `getleads_search`. Enrichment still walks the
+waterfall. Vendor HTTP errors increment `errors` and, at ≥50% of calls
+(n≥10), appear in job `warnings`.
 
 Smartlead uses the monthly finder allotment on the Smartlead plan. Credits are
 checked via search-analytics; once they are spent the cascade falls through to

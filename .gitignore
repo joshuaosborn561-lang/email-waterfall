@@ -14,3 +14,4 @@ data/jobs/
 .DS_Store
 dist/
 *.egg-info/
+.getleads_oauth.json
