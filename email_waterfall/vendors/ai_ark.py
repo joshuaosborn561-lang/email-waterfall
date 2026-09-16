@@ -20,6 +20,7 @@ from email_waterfall.config import settings
 from email_waterfall.need import CAP_EMAIL, CAP_PEOPLE, CAP_PHONE, assert_capability
 
 from .base import EmailHit, PersonHit, PhoneHit, split_name
+from .errors import record_response_failure
 
 
 def _pick_email(payload: Any) -> tuple[str, str]:
@@ -117,6 +118,7 @@ class AiArkClient:
         self.timeout = timeout
         self.calls = 0
         self.hits = 0
+        self.errors = 0
 
     @property
     def enabled(self) -> bool:
@@ -133,19 +135,23 @@ class AiArkClient:
         if not self.enabled:
             return 0, None
         self.calls += 1
+        url = f"{self.base_url}{path}"
         r = http_client.post(
             self.tier,
-            f"{self.base_url}{path}",
+            url,
             json=body,
             headers=self._headers(),
             timeout=self.timeout,
         )
         if r is None:
+            record_response_failure(self, url, None)
             return 0, None
         try:
             data = r.json()
         except ValueError:
             data = None
+        if r.status_code >= 400:
+            record_response_failure(self, url, r)
         return r.status_code, data
 
     def _person_from_row(self, row: dict[str, Any]) -> PersonHit | None:

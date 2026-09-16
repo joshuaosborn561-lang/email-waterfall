@@ -9,6 +9,7 @@ from email_waterfall.config import settings
 from email_waterfall.need import CAP_EMAIL, CAP_PEOPLE, CAP_PHONE, assert_capability
 
 from .base import EmailHit, PersonHit, PhoneHit, person_from_row
+from .errors import record_response_failure
 
 
 class LeadMagicClient:
@@ -20,6 +21,7 @@ class LeadMagicClient:
         self.timeout = timeout
         self.calls = 0
         self.hits = 0
+        self.errors = 0
 
     @property
     def enabled(self) -> bool:
@@ -45,12 +47,15 @@ class LeadMagicClient:
             timeout=self.timeout,
         )
         if r is None:
+            record_response_failure(self, url, None)
             return None
         try:
             if r.status_code >= 400:
+                record_response_failure(self, url, r)
                 return None
             return r.json()
         except ValueError:
+            record_response_failure(self, url, r, error="non-json")
             return None
 
     def find_email(

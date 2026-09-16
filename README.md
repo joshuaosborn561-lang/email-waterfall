@@ -26,6 +26,8 @@ Peterson / default owner titles: Owner, Founder, Principal, President, Partner, 
 getleads → Smartlead → AI Ark → LeadMagic → Prospeo → FullEnrich
 ```
 
+**getleads** is an OAuth 2.1 MCP (`https://app.getleads.io/api/mcp`), not a REST API. There is no API key. A person runs `python scripts/getleads_auth.py` once; the server then keeps itself authorized with the rotating refresh token in `public.ew_vendor_oauth_tokens`. Discovery (geography + industry + seniority + headcount) goes through the MCP tool `getleads_search`, which maps onto whatever people/lead-search tool `tools/list` actually exposes. `find_email` / `find_people` in the waterfall use the same live catalog — they return nothing (and log once) if no matching tool exists. Non-2xx and `isError` increment `tier_stats.*.errors` and never look like a quiet miss.
+
 Smartlead is the **included plan email finder** (name + domain via `POST .../find-emails`). Remaining allotment is read from `GET .../search-analytics` (`availableCredits`). When credits are spent, the cascade falls through to paid tiers. It is not used for DM people search.
 
 AI Ark is next on **people, email, and cellphone** (not people-only):
@@ -52,6 +54,10 @@ LeadMagic mobile-finder runs after AI Ark when a LinkedIn URL or work email is a
 ## Name + company (no domain)
 
 Rows with `first_name` + `last_name` + `company_name` and no domain are tagged `mode=name_company`. They skip getleads and Smartlead and enter at AI Ark → LeadMagic → Prospeo → FullEnrich. `company_name` is sent to FullEnrich verbatim (never replaced with a domain string). When a tier returns an email, its domain is written onto the row for later tiers.
+
+## MCP tool: `getleads_search`
+
+Pull new leads (not just enrich rows you already have). Pass `filters` using the live field names in the response `filter_schema` (from getleads `tools/list`). Returns counts plus a compact preview — never raw payloads. `write=true` with a `client_tag` upserts `{tag}_wf_companies` / `_wf_contacts` with `source_tool='getleads_search'`.
 
 ## MCP tool: `enrich_waterfall`
 
@@ -103,7 +109,7 @@ Smartlead 429 / rate-limit backs off and retries. It does not set `credits_exhau
 
 Inline `rows` still works as before (domain and/or name+company). Response is **counts / job_id / cost only** — never row payloads. Long HTTP runs return `job_id` — poll `get_job_status`.
 
-Other tools: `health`, `ensure_client`, `list_clients`, `describe_client`, `get_job_status`, `list_background_jobs`.
+Other tools: `health`, `ensure_client`, `list_clients`, `describe_client`, `get_job_status`, `list_background_jobs`, `getleads_search`.
 
 ## Supabase writes
 
@@ -153,7 +159,8 @@ railway variables set \
   MCP_TRANSPORT=streamable-http \
   SUPABASE_URL=https://azpapwtnrbzywlnxxecz.supabase.co \
   SUPABASE_SERVICE_ROLE_KEY=… \
-  GETLEADS_API_KEY=… \
+  GETLEADS_CLIENT_ID=… \
+  GETLEADS_REFRESH_TOKEN=… \
   AI_ARK_API_KEY=… \
   LEADMAGIC_API_KEY=…
 # optional: FULLENRICH_API_KEY=…

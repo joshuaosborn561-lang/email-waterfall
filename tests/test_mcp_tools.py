@@ -13,6 +13,7 @@ def test_tool_names() -> None:
     if inspect.iscoroutine(tools):
         tools = asyncio.run(tools)
     names = sorted(t.name for t in tools)
+    assert "getleads_search" in names
     assert "enrich_waterfall" in names
     assert "health" in names
     assert "get_job_status" in names
@@ -29,6 +30,18 @@ def test_tool_names() -> None:
         "probe_maps",
     }
     assert banned.isdisjoint(set(names))
+
+
+def test_health_getleads_is_oauth_snapshot() -> None:
+    import json
+
+    from mcp_server.server import health
+
+    data = json.loads(health())
+    gl = data["vendors"]["getleads"]
+    assert set(gl) >= {"configured", "auth_ok", "reason", "tools"}
+    assert gl["configured"] is False
+    assert gl["auth_ok"] is False
 
 
 def test_enrich_waterfall_has_source_and_estimate_only() -> None:

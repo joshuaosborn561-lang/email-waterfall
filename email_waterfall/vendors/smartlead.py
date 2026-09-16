@@ -17,6 +17,7 @@ from email_waterfall.config import settings
 from email_waterfall.need import CAP_EMAIL, assert_capability
 
 from .base import EmailHit
+from .errors import record_response_failure
 
 FIND_EMAILS_PATH = "/search-contacts/find-emails"
 ANALYTICS_PATH = "/search-analytics"
@@ -93,6 +94,7 @@ class SmartleadClient:
         self.timeout = timeout
         self.calls = 0
         self.hits = 0
+        self.errors = 0
 
     @property
     def enabled(self) -> bool:
@@ -133,6 +135,7 @@ class SmartleadClient:
             with _CREDITS.lock:
                 return _CREDITS.available
         if r.status_code >= 400:
+            record_response_failure(self, self._url(ANALYTICS_PATH), r)
             with _CREDITS.lock:
                 return _CREDITS.available
         try:
@@ -277,23 +280,28 @@ class SmartleadClient:
                 timeout=self.timeout,
             )
             if r is None:
+                record_response_failure(self, self._url(FIND_EMAILS_PATH), None)
                 return None
             body = _safe_json(r)
             if _is_throttle(r, body):
                 if attempt < 3:
                     time.sleep(_throttle_wait(attempt, r))
                     continue
+                record_response_failure(self, self._url(FIND_EMAILS_PATH), r, error="throttled")
                 return None
             break
         if r is None:
+            record_response_failure(self, self._url(FIND_EMAILS_PATH), None)
             return None
         if getattr(r, "status_code", 0) == 402:
             self._mark_exhausted(force=True)
+            record_response_failure(self, self._url(FIND_EMAILS_PATH), r)
             return None
         if _is_credit_zero(r, body):
             self._mark_exhausted()
             return None
         if r.status_code >= 400:
+            record_response_failure(self, self._url(FIND_EMAILS_PATH), r)
             return None
         if not isinstance(body, dict) or body.get("success") is False:
             return None
