@@ -22,7 +22,9 @@ def _vendor(*, enabled: bool = True, people=None, email=None):
     return m
 
 
-def _patch_clients(monkeypatch, *, gl, ark, lm, fe, prospeo=None, smartlead=None) -> None:
+def _patch_clients(
+    monkeypatch, *, gl, ark, lm, fe, prospeo=None, smartlead=None, veriphone=None
+) -> None:
     monkeypatch.setattr(waterfall, "GetLeadsClient", lambda: gl)
     monkeypatch.setattr(
         waterfall,
@@ -33,6 +35,11 @@ def _patch_clients(monkeypatch, *, gl, ark, lm, fe, prospeo=None, smartlead=None
     monkeypatch.setattr(waterfall, "LeadMagicClient", lambda: lm)
     monkeypatch.setattr(waterfall, "ProspeoClient", lambda: prospeo or _vendor(enabled=False))
     monkeypatch.setattr(waterfall, "FullEnrichClient", lambda: fe)
+    monkeypatch.setattr(
+        waterfall,
+        "VeriphoneClient",
+        lambda *args, **kwargs: veriphone or _vendor(enabled=False),
+    )
 
 
 def _patch_writes(monkeypatch, sink: dict) -> None:

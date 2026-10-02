@@ -84,7 +84,9 @@ AI Ark is fully used on all three lanes (not people-only):
 - cellphone: LinkedIn URL or name+domain → `POST /v2/people/mobile-phone-finder`
 
 Cellphones also fall through to LeadMagic mobile-finder (and Prospeo if
-max_tier allows). Input `phone` / `cellphone` / `mobile` is written as cellphone.
+max_tier allows). Input `phone` / `cellphone` / `mobile` is written as cellphone
+except on need='phone': those runs also call Veriphone `GET /v2/verify` and
+keep the number only when `phone_type` is `mobile`.
 
 `need` is an allowlist of what may be *requested from vendors*, applied before
 any HTTP call. It is independent of `max_tier` (depth).
@@ -92,7 +94,7 @@ any HTTP call. It is independent of `max_tier` (depth).
 | need | May call | Must not call |
 |---|---|---|
 | email | email finders only | any phone/mobile endpoint |
-| phone | phone finders (+ people search for LinkedIn) | any email finder |
+| phone | phone finders (+ people search for LinkedIn) + Veriphone mobile check | any email finder |
 | dm | people-discovery only | phone and email finders |
 | both | email + phone + people | — |
 

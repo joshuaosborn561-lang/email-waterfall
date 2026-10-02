@@ -42,6 +42,8 @@ def test_health_getleads_is_oauth_snapshot() -> None:
     assert set(gl) >= {"configured", "auth_ok", "reason", "tools"}
     assert gl["configured"] is False
     assert gl["auth_ok"] is False
+    assert "veriphone" in data["vendors"]
+    assert data["vendors"]["veriphone"] is False
 
 
 def test_enrich_waterfall_has_source_and_estimate_only() -> None:

@@ -6,12 +6,13 @@ endpoint on need='email' must raise rather than silently spend credits.
 Capabilities:
   email   — work-email finders (getleads, Smartlead, AI Ark export/single, …)
   phone   — mobile/cellphone finders (AI Ark mobile-phone-finder, LeadMagic
-            mobile-finder, Prospeo enrich_mobile)
+            mobile-finder, Prospeo enrich_mobile) plus Veriphone /v2/verify
+            so only phone_type=mobile is written
   people  — decision-maker / people search (not an email finder)
 
 need='email'  → email only
-need='phone'  → phone finders + people search (LinkedIn for the phone path);
-                no email finders
+need='phone'  → phone finders + people search (LinkedIn for the phone path)
+                + Veriphone mobile check; no email finders
 need='dm'     → people search only
 need='both'   → email + phone + people
 """
