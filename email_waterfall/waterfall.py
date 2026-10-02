@@ -10,6 +10,11 @@ AI Ark is third on BOTH lanes after the included Smartlead allotment is used:
 Also fills cellphone: AI Ark mobile-phone-finder (LinkedIn or name+domain),
 then LeadMagic mobile-finder, then Prospeo if max_tier allows.
 
+On need='phone' only, every candidate number (input or vendor) is checked
+with Veriphone GET /v2/verify. Only phone_type=mobile is written. Landline /
+voip / invalid fall through to the next finder. need='both' / 'email' skip
+Veriphone.
+
 `need` is an allowlist of vendor capabilities (email / phone / people), applied
 before any vendor HTTP call. need='email' must not call phone endpoints.
 AI Ark search-then-export is one attempt and two vendor_calls.
@@ -52,6 +57,7 @@ from .vendors.getleads import GetLeadsClient
 from .vendors.leadmagic import LeadMagicClient
 from .vendors.prospeo import ProspeoClient
 from .vendors.smartlead import SmartleadClient
+from .vendors.veriphone import VeriphoneClient
 
 Need = Literal["email", "dm", "both", "phone"]
 MaxTier = Literal["getleads", "smartlead", "aiark", "leadmagic", "prospeo", "fullenrich"]
@@ -314,6 +320,7 @@ class Waterfall:
         leadmagic: LeadMagicClient | None = None,
         prospeo: ProspeoClient | None = None,
         fullenrich: FullEnrichClient | None = None,
+        veriphone: VeriphoneClient | None = None,
         max_tier: str = DEFAULT_MAX_TIER,
         target_titles: list[str] | None = None,
         fallback_titles: frozenset[str] | None = None,
@@ -326,6 +333,7 @@ class Waterfall:
         self.leadmagic = leadmagic or LeadMagicClient()
         self.prospeo = prospeo or ProspeoClient()
         self.fullenrich = fullenrich or FullEnrichClient()
+        self.veriphone = veriphone or VeriphoneClient()
         self.max_tier = normalize_max_tier(max_tier)
         self.need = normalize_need(need)
         self.target_titles = list(target_titles or [])
@@ -338,12 +346,14 @@ class Waterfall:
             "leadmagic": _empty_stats(),
             "prospeo": _empty_stats(),
             "fullenrich": _empty_stats(),
+            "veriphone": _empty_stats(),
         }
         self.suppressed_by_need: dict[str, int] = {}
         self._row_attempts: set[tuple[str, int]] = set()
         self._vendor_dm_cache: dict[str, PersonHit | None] = {}
         self._email_cache: dict[tuple[str, ...], EmailHit | None] = {}
         self._phone_cache: dict[tuple[str, ...], PhoneHit | None] = {}
+        self._veriphone_cache: dict[str, PhoneHit | None] = {}
         self._lock = threading.Lock()
 
     def _bump(self, tier: str, field: str) -> None:
@@ -641,15 +651,73 @@ class Waterfall:
             if eligible:
                 self._suppress(f"{tier}_phone")
 
+    def _phone_only(self) -> bool:
+        return current_need() == "phone"
+
+    def _accept_phone(
+        self,
+        phone: str,
+        *,
+        source_tier: str,
+        raw: dict[str, Any] | None = None,
+    ) -> PhoneHit | None:
+        """On need='phone', keep the number only when Veriphone says mobile."""
+        number = (phone or "").strip()
+        if not number:
+            return None
+        if not self._phone_only():
+            return PhoneHit(phone=number, source_tier=source_tier, raw=raw or {})
+
+        digits = "".join(c for c in number if c.isdigit())
+        if digits:
+            with self._lock:
+                if digits in self._veriphone_cache:
+                    cached = self._veriphone_cache[digits]
+                    if cached is None:
+                        return None
+                    merged = dict(raw or {})
+                    merged.update(cached.raw or {})
+                    return PhoneHit(
+                        phone=cached.phone, source_tier=source_tier, raw=merged
+                    )
+
+        if not self.veriphone.enabled:
+            self._bump("veriphone", "skipped_unconfigured")
+            return PhoneHit(phone=number, source_tier=source_tier, raw=raw or {})
+
+        assert_capability(CAP_PHONE, vendor="waterfall", endpoint="veriphone")
+        checked = self.veriphone.check_mobile(number)
+        if checked:
+            self._bump("veriphone", "phone_hits")
+            merged = dict(raw or {})
+            merged["veriphone"] = checked.raw
+            hit = PhoneHit(phone=checked.phone, source_tier=source_tier, raw=merged)
+            if digits:
+                with self._lock:
+                    self._veriphone_cache[digits] = hit
+            return hit
+        self._bump("veriphone", "rejected")
+        if digits:
+            with self._lock:
+                self._veriphone_cache[digits] = None
+        return None
+
     def resolve_phone(
         self, row: dict[str, Any], *, email: str = ""
     ) -> PhoneHit | None:
         self._bind_need()
         existing = (row.get("phone") or "").strip()
         if existing:
-            return PhoneHit(phone=existing, source_tier="input")
+            accepted = self._accept_phone(existing, source_tier="input")
+            if accepted:
+                return accepted
+            if not self._phone_only():
+                return PhoneHit(phone=existing, source_tier="input")
+            # Landline / non-mobile input: keep looking for a vendor mobile.
 
-        eligible = self._phone_vendor_eligible(row, email=email)
+        # Existing phone already handled above. Do not skip finders just
+        # because a rejected landline is still on the row.
+        eligible = self._phone_vendor_eligible({**row, "phone": ""}, email=email)
         if not any(eligible.values()):
             return None
         assert_capability(CAP_PHONE, vendor="waterfall", endpoint="resolve_phone")
@@ -675,7 +743,7 @@ class Waterfall:
         hit: PhoneHit | None = None
         if eligible.get("aiark"):
             self._bump_attempt("aiark", row)
-            hit = self.ai_ark.find_mobile(
+            found = self.ai_ark.find_mobile(
                 first,
                 last,
                 domain,
@@ -683,20 +751,28 @@ class Waterfall:
                 linkedin_url=linkedin,
                 full_name=full,
             )
-            if hit:
-                self._bump("aiark", "phone_hits")
+            if found:
+                hit = self._accept_phone(
+                    found.phone, source_tier=found.source_tier, raw=found.raw
+                )
+                if hit:
+                    self._bump("aiark", "phone_hits")
 
         if not hit and eligible.get("leadmagic"):
             self._bump_attempt("leadmagic", row)
-            hit = self.leadmagic.find_mobile(
+            found = self.leadmagic.find_mobile(
                 linkedin_url=linkedin, work_email=work_email
             )
-            if hit:
-                self._bump("leadmagic", "phone_hits")
+            if found:
+                hit = self._accept_phone(
+                    found.phone, source_tier=found.source_tier, raw=found.raw
+                )
+                if hit:
+                    self._bump("leadmagic", "phone_hits")
 
         if not hit and eligible.get("prospeo"):
             self._bump_attempt("prospeo", row)
-            hit = self.prospeo.find_mobile(
+            found = self.prospeo.find_mobile(
                 first,
                 last,
                 domain,
@@ -704,8 +780,12 @@ class Waterfall:
                 linkedin_url=linkedin,
                 full_name=full,
             )
-            if hit:
-                self._bump("prospeo", "phone_hits")
+            if found:
+                hit = self._accept_phone(
+                    found.phone, source_tier=found.source_tier, raw=found.raw
+                )
+                if hit:
+                    self._bump("prospeo", "phone_hits")
 
         with self._lock:
             self._phone_cache[cache_key] = hit
@@ -824,9 +904,15 @@ def _enrich_one_row(
         phone_hit: PhoneHit | None = None
         if want_phone:
             phone_hit = wf.resolve_phone(row, email=email)
-            phone = (phone_hit.phone if phone_hit else "") or row.get("phone") or ""
-            if phone and not row.get("phone"):
+            if phone_hit:
+                phone = phone_hit.phone
                 row["phone"] = phone
+            elif need_norm == "phone":
+                # Rejected by Veriphone: do not write the input landline.
+                phone = ""
+                row["phone"] = ""
+            else:
+                phone = row.get("phone") or ""
         else:
             wf.record_phone_skips(row, email=email)
             phone = row.get("phone") or ""
@@ -850,7 +936,7 @@ def _int_attr(obj: Any, name: str) -> int:
         return 0
 
 
-def _tier_warnings(tier_stats: dict[str, dict[str, Any]]) -> list[str]:
+def _tier_warnings(tier_stats: dict[str, dict[str, Any]], *, need_norm: str = "both", veriphone_enabled: bool = True) -> list[str]:
     """Surface a tier that is failing, not merely missing. 0 hits + 2000 errors must not look quiet."""
     warnings: list[str] = []
     for name, stats in tier_stats.items():
@@ -858,6 +944,8 @@ def _tier_warnings(tier_stats: dict[str, dict[str, Any]]) -> list[str]:
         errors = int(stats.get("errors") or 0)
         if calls >= 10 and errors * 2 > calls:
             warnings.append(name)
+    if need_norm == "phone" and not veriphone_enabled:
+        warnings.append("veriphone_unconfigured")
     return warnings
 
 
@@ -869,6 +957,7 @@ def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]
         ("leadmagic", wf.leadmagic),
         ("prospeo", wf.prospeo),
         ("fullenrich", wf.fullenrich),
+        ("veriphone", wf.veriphone),
     ):
         wf.tier_stats[name]["vendor_calls"] = _int_attr(vendor, "calls")
         wf.tier_stats[name]["vendor_hits"] = _int_attr(vendor, "hits")
@@ -922,7 +1011,11 @@ def _result_payload(
     companies_total: int | None = None,
 ) -> dict[str, Any]:
     tier_breakdown = _tier_breakdown(wf, max_tier_n)
-    warnings = _tier_warnings(wf.tier_stats)
+    warnings = _tier_warnings(
+        wf.tier_stats,
+        need_norm=need_norm,
+        veriphone_enabled=bool(getattr(wf.veriphone, "enabled", False)),
+    )
     out: dict[str, Any] = {
         "rows_in": parsed_count,
         "companies_upserted": companies_upserted,
@@ -930,6 +1023,9 @@ def _result_payload(
         "emails_found": emails_found,
         "dms_found": dms_found,
         "phones_found": phones_found,
+        "phones_rejected_not_mobile": int(
+            (wf.tier_stats.get("veriphone") or {}).get("rejected") or 0
+        ),
         "modes": getattr(wf, "modes", None) or classify_rows([]),
         "tier_stats": dict(wf.tier_stats),
         "tier_breakdown": tier_breakdown,
@@ -950,6 +1046,7 @@ def _result_payload(
             "leadmagic": wf.leadmagic.enabled and wf._allowed("leadmagic"),
             "prospeo": wf.prospeo.enabled and wf._allowed("prospeo"),
             "fullenrich": wf.fullenrich.enabled and wf._allowed("fullenrich"),
+            "veriphone": bool(wf.veriphone.enabled),
         },
     }
     if companies_done is not None:

@@ -111,6 +111,7 @@ def health() -> str:
                 "leadmagic": bool(settings.leadmagic_api_key),
                 "prospeo": bool(settings.prospeo_api_key),
                 "fullenrich": bool(settings.fullenrich_api_key),
+                "veriphone": bool(settings.veriphone_api_key),
             },
             "smartlead_credits": _smartlead_credits(),
             "clients": {
@@ -434,7 +435,9 @@ def enrich_waterfall(
     need = 'dm' | 'email' | 'both' | 'phone'. Gates vendor *calls*, not just
     output. need='email' never hits phone/mobile endpoints (AI Ark
     mobile-phone-finder, LeadMagic mobile-finder, Prospeo enrich_mobile).
-    need='phone' never hits email finders. max_tier caps depth independently.
+    need='phone' never hits email finders. On need='phone' every candidate
+    number is sent to Veriphone /v2/verify; only phone_type=mobile is written.
+    max_tier caps depth independently.
     max_tier = 'getleads' | 'smartlead' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
     (default 'leadmagic' / alias 'lm' — stops before Prospeo and FullEnrich).
     """

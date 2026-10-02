@@ -25,6 +25,7 @@ TIER_ENV_KEYS: dict[str, str] = {
     "leadmagic": "LEADMAGIC_CONCURRENCY",
     "prospeo": "PROSPEO_CONCURRENCY",
     "fullenrich": "FULLENRICH_CONCURRENCY",
+    "veriphone": "VERIPHONE_CONCURRENCY",
 }
 
 DEFAULT_VENDOR_LIMITS: dict[str, int] = {
@@ -34,6 +35,7 @@ DEFAULT_VENDOR_LIMITS: dict[str, int] = {
     "leadmagic": 6,
     "prospeo": 6,
     "fullenrich": 4,
+    "veriphone": 8,
 }
 
 CROSS_PROCESS_TIERS = frozenset({"smartlead"})

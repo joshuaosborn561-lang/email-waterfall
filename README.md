@@ -38,6 +38,8 @@ AI Ark is next on **people, email, and cellphone** (not people-only):
 
 LeadMagic mobile-finder runs after AI Ark when a LinkedIn URL or work email is available. Prospeo `enrich_mobile` only runs if `max_tier` is raised to `prospeo` or `fullenrich`.
 
+On `need='phone'` only, every candidate number (input or vendor) is checked with Veriphone `GET /v2/verify`. A number is written as cellphone only when `phone_valid` is true and `phone_type` is `mobile`. Landline / voip / invalid are dropped and the next finder is tried. Set `VERIPHONE_API_KEY`. `need='both'` and `need='email'` skip Veriphone.
+
 `max_tier` default is `leadmagic` (alias `lm`). Raise it to `prospeo` / `fullenrich` (alias `fe`) if you want later paid email tiers.
 
 `need` gates **vendor calls**, not just output. It is independent of `max_tier`:
@@ -45,7 +47,7 @@ LeadMagic mobile-finder runs after AI Ark when a LinkedIn URL or work email is a
 | `need` | May call | Must not call |
 |---|---|---|
 | `email` | email finders only | any phone/mobile endpoint |
-| `phone` | phone finders (+ people search) | any email finder |
+| `phone` | phone finders (+ people search) + Veriphone mobile check | any email finder |
 | `dm` | people-discovery only | phone and email finders |
 | `both` | email + phone + people | — |
 

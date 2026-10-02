@@ -32,6 +32,7 @@ class Settings:
     leadmagic_api_key: str
     prospeo_api_key: str
     fullenrich_api_key: str
+    veriphone_api_key: str
     smartlead_api_key: str
     smartlead_base_url: str
 
@@ -61,6 +62,7 @@ def load_settings() -> Settings:
         leadmagic_api_key=_env("LEADMAGIC_API_KEY") or _env("LEADMAGIC_KEY"),
         prospeo_api_key=_env("PROSPEO_API_KEY"),
         fullenrich_api_key=_env("FULLENRICH_API_KEY"),
+        veriphone_api_key=_env("VERIPHONE_API_KEY") or _env("VERIPHONE_KEY"),
         smartlead_api_key=_env("SMARTLEAD_API_KEY") or _env("SMARTLEAD_KEY"),
         smartlead_base_url=_env(
             "SMARTLEAD_FIND_EMAIL_BASE_URL",
