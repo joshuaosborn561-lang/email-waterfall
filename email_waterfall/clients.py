@@ -425,6 +425,12 @@ def ensure_client(
                     f"ensure_client({tag!r}) could not create write tables: {rpc_error}"
                 ) from rpc_error
             raise
+        try:
+            from . import supabase_sync
+
+            supabase_sync.ensure_contact_columns(cfg)
+        except Exception:
+            pass
     return cfg
 
 

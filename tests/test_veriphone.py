@@ -9,7 +9,7 @@ import pytest
 from email_waterfall import waterfall
 from email_waterfall.need import NeedViolation, using_need
 from email_waterfall.vendors.base import EmailHit, PersonHit, PhoneHit
-from email_waterfall.vendors.veriphone import VeriphoneClient
+from email_waterfall.vendors.veriphone import VeriphoneClient, VeriphoneResult
 from tests.test_waterfall import _patch_clients, _patch_writes, _vendor
 
 
@@ -22,14 +22,28 @@ class _Resp:
         return self._body
 
 
-def _veriphone(*, mobile: bool = True, e164: str = "+12015550100"):
+def _veriphone(
+    *,
+    mobile: bool = True,
+    e164: str = "+12015550100",
+    phone_type: str | None = None,
+):
+    ptype = phone_type or ("mobile" if mobile else "fixed_line")
+    result = VeriphoneResult(
+        phone=e164,
+        phone_valid=True,
+        phone_type=ptype,
+        e164=e164,
+        raw={"phone_type": ptype, "phone_valid": True, "e164": e164},
+    )
     m = MagicMock()
     m.enabled = True
     m.calls = 0
     m.hits = 0
     m.errors = 0
+    m.verify.return_value = result
     m.check_mobile.return_value = (
-        PhoneHit(phone=e164, source_tier="veriphone", raw={"phone_type": "mobile"})
+        PhoneHit(phone=e164, source_tier="veriphone", raw=result.raw)
         if mobile
         else None
     )
@@ -148,7 +162,8 @@ def test_need_phone_keeps_veriphone_mobile(monkeypatch) -> None:
     assert out["phones_rejected_not_mobile"] == 0
     assert out["vendors_enabled"]["veriphone"] is True
     assert sink["contacts"][0]["cellphone"] == "+19725550111"
-    vp.check_mobile.assert_called()
+    assert sink["contacts"][0]["line_type"] == "mobile"
+    vp.verify.assert_called()
     ark.find_mobile.assert_called()
 
 
@@ -163,13 +178,25 @@ def test_need_phone_drops_landline_and_tries_next_vendor(monkeypatch) -> None:
         phone="+19725550199", source_tier="leadmagic"
     )
 
-    def check_mobile(phone, **kwargs):
+    def verify(phone, **kwargs):
         if "2025550100" in "".join(c for c in phone if c.isdigit()):
-            return None
-        return PhoneHit(phone="+19725550199", source_tier="veriphone")
+            return VeriphoneResult(
+                phone=phone,
+                phone_valid=True,
+                phone_type="fixed_line",
+                e164="+12025550100",
+                raw={"phone_type": "fixed_line", "phone_valid": True},
+            )
+        return VeriphoneResult(
+            phone=phone,
+            phone_valid=True,
+            phone_type="mobile",
+            e164="+19725550199",
+            raw={"phone_type": "mobile", "phone_valid": True, "e164": "+19725550199"},
+        )
 
     vp = _veriphone()
-    vp.check_mobile.side_effect = check_mobile
+    vp.verify.side_effect = verify
     _patch_clients(
         monkeypatch,
         gl=_vendor(email=None),
@@ -196,6 +223,7 @@ def test_need_phone_drops_landline_and_tries_next_vendor(monkeypatch) -> None:
     assert out["phones_found"] == 1
     assert out["phones_rejected_not_mobile"] == 1
     assert sink["contacts"][0]["cellphone"] == "+19725550199"
+    assert sink["contacts"][0]["line_type"] == "mobile"
     ark.find_mobile.assert_called()
     lm.find_mobile.assert_called()
 
@@ -232,6 +260,7 @@ def test_need_phone_rejects_input_landline(monkeypatch) -> None:
     assert out["phones_rejected_not_mobile"] >= 1
     contact = sink["contacts"][0]
     assert not contact.get("cellphone")
+    assert contact.get("line_type") == "fixed_line"
     ark.find_mobile.assert_called()
 
 
@@ -266,6 +295,7 @@ def test_need_both_skips_veriphone(monkeypatch) -> None:
     )
     assert out["phones_found"] == 1
     assert sink["contacts"][0]["cellphone"] == "+12015550100"
+    vp.verify.assert_not_called()
     vp.check_mobile.assert_not_called()
 
 
@@ -304,3 +334,172 @@ def test_need_phone_unconfigured_keeps_number_and_warns(monkeypatch) -> None:
     assert out["phones_found"] == 1
     assert "veriphone_unconfigured" in out["warnings"]
     assert sink["contacts"][0]["cellphone"] == "+19725550111"
+
+
+def test_need_phone_writes_source_phone_and_line_type(monkeypatch) -> None:
+    sink: dict = {}
+    ark = _vendor(enabled=True)
+    ark.find_mobile.return_value = PhoneHit(
+        phone="+19725550111", source_tier="aiark"
+    )
+    vp = _veriphone(mobile=True, e164="+19725550111")
+    _patch_clients(
+        monkeypatch,
+        gl=_vendor(email=None),
+        ark=ark,
+        lm=_vendor(enabled=False),
+        fe=_vendor(enabled=False),
+        veriphone=vp,
+    )
+    _patch_writes(monkeypatch, sink)
+    writebacks: list[dict] = []
+    monkeypatch.setattr(
+        waterfall.table_source,
+        "fetch_source_rows",
+        lambda src: [
+            {
+                "_source_key": 4,
+                "first_name": "Jane",
+                "last_name": "Smith",
+                "company_name": "Roof Co",
+                "domain": "roofco.com",
+            }
+        ],
+    )
+    monkeypatch.setattr(waterfall.table_source, "ensure_writeback_columns", lambda src: [])
+    monkeypatch.setattr(
+        waterfall.table_source,
+        "writeback_result",
+        lambda src, **kwargs: writebacks.append(kwargs),
+    )
+
+    out = waterfall.enrich_waterfall(
+        client_tag="peterson",
+        need="phone",
+        write_supabase=True,
+        source={"table": "ew_names_ready"},
+    )
+    assert out["phones_found"] == 1
+    assert writebacks[0]["phone"] == "+19725550111"
+    assert writebacks[0]["phone_type"] == "mobile"
+    assert sink["contacts"][0]["line_type"] == "mobile"
+
+
+def test_verify_only_skips_finders_and_writes_verdict(monkeypatch) -> None:
+    sink: dict = {}
+    ark = _vendor(enabled=True)
+    ark.find_mobile.return_value = PhoneHit(
+        phone="+19725550999", source_tier="aiark"
+    )
+    vp = _veriphone(mobile=True, e164="+14155552671")
+    _patch_clients(
+        monkeypatch,
+        gl=_vendor(email=None),
+        ark=ark,
+        lm=_vendor(enabled=True),
+        fe=_vendor(enabled=False),
+        veriphone=vp,
+    )
+    _patch_writes(monkeypatch, sink)
+    writebacks: list[dict] = []
+    monkeypatch.setattr(
+        waterfall.table_source,
+        "fetch_source_rows",
+        lambda src: [
+            {
+                "_source_key": 8,
+                "first_name": "Jane",
+                "last_name": "Smith",
+                "company_name": "Roof Co",
+                "domain": "roofco.com",
+                "phone": "415-555-2671",
+            }
+        ],
+    )
+    monkeypatch.setattr(waterfall.table_source, "ensure_writeback_columns", lambda src: [])
+    monkeypatch.setattr(
+        waterfall.table_source,
+        "writeback_result",
+        lambda src, **kwargs: writebacks.append(kwargs),
+    )
+
+    out = waterfall.enrich_waterfall(
+        client_tag="peterson",
+        need="phone",
+        verify_only=True,
+        write_supabase=True,
+        source={"table": "ew_names_ready"},
+    )
+    assert out["verify_only"] is True
+    assert out["phones_found"] == 1
+    ark.find_mobile.assert_not_called()
+    vp.verify.assert_called()
+    assert sink["contacts"][0]["cellphone"] == "+14155552671"
+    assert sink["contacts"][0]["line_type"] == "mobile"
+    assert writebacks[0]["phone"] == "+14155552671"
+    assert writebacks[0]["phone_type"] == "mobile"
+
+
+def test_verify_only_records_landline_without_finder(monkeypatch) -> None:
+    sink: dict = {}
+    ark = _vendor(enabled=True)
+    ark.find_mobile.return_value = PhoneHit(
+        phone="+19725550999", source_tier="aiark"
+    )
+    vp = _veriphone(mobile=False, e164="+12025550100", phone_type="fixed_line")
+    _patch_clients(
+        monkeypatch,
+        gl=_vendor(email=None),
+        ark=ark,
+        lm=_vendor(enabled=False),
+        fe=_vendor(enabled=False),
+        veriphone=vp,
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+                "phone": "202-555-0100",
+            }
+        ],
+        client_tag="peterson",
+        need="phone",
+        verify_only=True,
+        write_supabase=True,
+    )
+    ark.find_mobile.assert_not_called()
+    assert out["verify_only"] is True
+    assert out["phones_rejected_not_mobile"] >= 1
+    contact = sink["contacts"][0]
+    assert contact["line_type"] == "fixed_line"
+    assert contact.get("cellphone") == "202-555-0100"
+
+
+def test_verify_only_estimate_has_no_finder_credits(monkeypatch) -> None:
+    from tests.test_estimate import _mute_smartlead
+
+    _mute_smartlead(monkeypatch)
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+                "phone": "415-555-2671",
+            }
+        ],
+        client_tag="peterson",
+        need="phone",
+        verify_only=True,
+        estimate_only=True,
+        write_supabase=False,
+    )
+    assert out["estimate_only"] is True
+    assert out["verify_only"] is True
+    assert out["estimate"] == {}
+    assert out["spend"] == 0
+    assert out["rows_with_phone"] == 1

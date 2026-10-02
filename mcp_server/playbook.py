@@ -48,8 +48,16 @@ where: "dl_status is null"
 security-definer RPC when the schema is not `public` (PostgREST only exposes
 public). Never returns payloads. Writeback (default on) patches `dl_status`,
 `candidate_email`, `dl_provider` on the queue (and `wf_*` when those columns
-exist) so a row is marked after it is processed. Resume with `dl_status is null`.
-Omitted `map` auto-picks `owner_title` → title and `candidate_email` → email.
+exist) so a row is marked after it is processed. Phone hits also write
+`wf_phone` + `wf_phone_type` (Veriphone line type) and `{client}_*contacts.line_type`.
+Existing contact rows are updated on `(domain, email)`, not skipped.
+Resume with `dl_status is null`.
+Omitted `map` auto-picks `owner_title` → title, `candidate_email` → email,
+and `phone` / `cellphone` / `wf_phone` → phone.
+
+`verify_only=true` runs Veriphone on numbers already on the row and writes
+the verdict. Finder HTTP is skipped — use this to classify numbers you
+already have without paying AI Ark / LeadMagic again.
 
 ## Name + company (no domain)
 Rows with first_name + last_name + company_name and no domain are tagged

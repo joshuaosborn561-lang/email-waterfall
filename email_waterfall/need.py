@@ -15,6 +15,10 @@ need='phone'  → phone finders + people search (LinkedIn for the phone path)
                 + Veriphone mobile check; no email finders
 need='dm'     → people search only
 need='both'   → email + phone + people
+
+verify_only (enrich_waterfall flag, not a need value) runs Veriphone on
+numbers already on the row and writes wf_phone / line_type. Finder HTTP
+is skipped.
 """
 
 from __future__ import annotations

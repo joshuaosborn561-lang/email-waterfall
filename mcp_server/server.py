@@ -301,7 +301,7 @@ def getleads_search(
         company_row,
         contact_row,
         insert_contacts,
-        insert_contacts_ignore_conflict,
+        upsert_contacts,
         upsert_companies,
     )
     from email_waterfall.vendors.getleads import GetLeadsClient, compact_person
@@ -360,7 +360,7 @@ def getleads_search(
         with_email = [c for c in contacts if c.get("email")]
         without = [c for c in contacts if not c.get("email")]
         if with_email:
-            contacts_written += insert_contacts_ignore_conflict(cfg, with_email)
+            contacts_written += upsert_contacts(cfg, with_email)
         if without:
             contacts_written += insert_contacts(cfg, without)
 
@@ -403,6 +403,7 @@ def enrich_waterfall(
     where: str = "",
     estimate_only: bool = False,
     writeback: bool = True,
+    verify_only: bool = False,
 ) -> str:
     """Resolve DMs + work emails + cellphones via paid vendors; write public.{client}_*.
 
@@ -423,7 +424,11 @@ def enrich_waterfall(
     key_column?, map?, limit?, cursor?}. Mutually exclusive with rows.
 
     Writeback (default true) patches wf_status / wf_email / wf_email_status /
-    wf_vendor / wf_updated_at on the source table.
+    wf_vendor / wf_updated_at / wf_phone / wf_phone_type on the source table.
+
+    `verify_only` = true checks existing phone numbers with Veriphone and
+    writes the number + line type. No finder HTTP. Use this to classify
+    numbers already on the queue without paying AI Ark / LeadMagic again.
 
     `estimate_only` = true returns row counts per mode, tiers each mode will
     touch, and a per-vendor credit estimate. Zero spend. Required before paid
@@ -436,7 +441,10 @@ def enrich_waterfall(
     output. need='email' never hits phone/mobile endpoints (AI Ark
     mobile-phone-finder, LeadMagic mobile-finder, Prospeo enrich_mobile).
     need='phone' never hits email finders. On need='phone' every candidate
-    number is sent to Veriphone /v2/verify; only phone_type=mobile is written.
+    number is sent to Veriphone /v2/verify; only phone_type=mobile is written
+    as cellphone. The number and Veriphone phone_type are always written back
+    (wf_phone / wf_phone_type, contacts.line_type). Existing contact rows are
+    updated, not skipped.
     max_tier caps depth independently.
     max_tier = 'getleads' | 'smartlead' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
     (default 'leadmagic' / alias 'lm' — stops before Prospeo and FullEnrich).
@@ -469,6 +477,7 @@ def enrich_waterfall(
             where=where or None,
             estimate_only=bool(estimate_only),
             writeback=bool(writeback) and not estimate_only,
+            verify_only=bool(verify_only),
         )
 
     def _run(job: Any) -> dict[str, Any]:
@@ -496,6 +505,7 @@ def enrich_waterfall(
             meta={
                 "need": need_norm,
                 "max_tier": max_tier_n,
+                "verify_only": bool(verify_only),
                 "client_tag": client.tag,
                 "rows_chars": rows_chars,
                 "source_table": (source_table or "").strip()

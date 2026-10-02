@@ -56,6 +56,7 @@ def _patch_writes(monkeypatch, sink: dict) -> None:
         return len(rows)
 
     monkeypatch.setattr(waterfall.supabase_sync, "upsert_companies", companies)
+    monkeypatch.setattr(waterfall.supabase_sync, "upsert_contacts", contacts)
     monkeypatch.setattr(
         waterfall.supabase_sync, "insert_contacts_ignore_conflict", contacts
     )

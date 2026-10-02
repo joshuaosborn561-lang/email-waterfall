@@ -11,9 +11,12 @@ Also fills cellphone: AI Ark mobile-phone-finder (LinkedIn or name+domain),
 then LeadMagic mobile-finder, then Prospeo if max_tier allows.
 
 On need='phone' only, every candidate number (input or vendor) is checked
-with Veriphone GET /v2/verify. Only phone_type=mobile is written. Landline /
-voip / invalid fall through to the next finder. need='both' / 'email' skip
-Veriphone.
+with Veriphone GET /v2/verify. Only phone_type=mobile is written as cellphone.
+Landline / voip / invalid fall through to the next finder. The number and
+Veriphone phone_type are written back to the source table as wf_phone /
+wf_phone_type, and to {client}_*contacts.line_type. need='both' / 'email'
+skip Veriphone unless verify_only=True (check numbers we already have; no
+finder spend).
 
 `need` is an allowlist of vendor capabilities (email / phone / people), applied
 before any vendor HTTP call. need='email' must not call phone endpoints.
@@ -57,7 +60,7 @@ from .vendors.getleads import GetLeadsClient
 from .vendors.leadmagic import LeadMagicClient
 from .vendors.prospeo import ProspeoClient
 from .vendors.smartlead import SmartleadClient
-from .vendors.veriphone import VeriphoneClient
+from .vendors.veriphone import VeriphoneClient, VeriphoneResult
 
 Need = Literal["email", "dm", "both", "phone"]
 MaxTier = Literal["getleads", "smartlead", "aiark", "leadmagic", "prospeo", "fullenrich"]
@@ -239,11 +242,34 @@ def estimate_waterfall(
     max_tier: str,
     need: str,
     client: ClientConfig,
+    verify_only: bool = False,
 ) -> dict[str, Any]:
     """Counts + per-vendor credit estimate. No enrichment vendor calls."""
     max_tier_n = normalize_max_tier(max_tier)
     need_norm = normalize_need(need)
     modes = classify_rows(parsed)
+    if verify_only:
+        mode_counts = {k: v for k, v in modes.items() if k != "skipped" and v}
+        if modes.get("skipped"):
+            mode_counts["skipped"] = modes["skipped"]
+        with_phone = sum(1 for r in parsed if (r.get("phone") or "").strip())
+        return {
+            "estimate_only": True,
+            "verify_only": True,
+            "rows_in": sum(v for k, v in modes.items() if k != "skipped"),
+            "rows_with_phone": with_phone,
+            "modes": mode_counts,
+            "tiers_by_mode": {},
+            "estimate": {},
+            "need": need_norm,
+            "need_capabilities": sorted(capabilities(need_norm)),
+            "suppressed_by_need": {},
+            "max_tier": max_tier_n,
+            "client_tag": client.tag,
+            "companies_table": client.companies_table,
+            "contacts_table": client.contacts_table,
+            "spend": 0,
+        }
     tiers_by_mode = {
         mode: _tiers_for_mode(mode, max_tier_n)
         for mode in ("domain", "name_company")
@@ -307,6 +333,7 @@ def estimate_waterfall(
         "companies_table": client.companies_table,
         "contacts_table": client.contacts_table,
         "spend": 0,
+        "verify_only": False,
     }
 
 
@@ -326,6 +353,7 @@ class Waterfall:
         fallback_titles: frozenset[str] | None = None,
         require_title_match: bool = True,
         need: str = "both",
+        verify_only: bool = False,
     ):
         self.getleads = getleads or GetLeadsClient()
         self.smartlead = smartlead or SmartleadClient()
@@ -336,6 +364,7 @@ class Waterfall:
         self.veriphone = veriphone or VeriphoneClient()
         self.max_tier = normalize_max_tier(max_tier)
         self.need = normalize_need(need)
+        self.verify_only = bool(verify_only)
         self.target_titles = list(target_titles or [])
         self.fallback_titles = fallback_titles or frozenset()
         self.require_title_match = bool(require_title_match)
@@ -353,8 +382,12 @@ class Waterfall:
         self._vendor_dm_cache: dict[str, PersonHit | None] = {}
         self._email_cache: dict[tuple[str, ...], EmailHit | None] = {}
         self._phone_cache: dict[tuple[str, ...], PhoneHit | None] = {}
-        self._veriphone_cache: dict[str, PhoneHit | None] = {}
+        self._veriphone_cache: dict[str, VeriphoneResult | None] = {}
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _phone_digits(number: str) -> str:
+        return "".join(c for c in (number or "") if c.isdigit())
 
     def _bump(self, tier: str, field: str) -> None:
         with self._lock:
@@ -654,6 +687,35 @@ class Waterfall:
     def _phone_only(self) -> bool:
         return current_need() == "phone"
 
+    def _should_verify_phone(self) -> bool:
+        return self.verify_only or self._phone_only()
+
+    def cached_phone_verdict(self, number: str) -> VeriphoneResult | None:
+        digits = self._phone_digits(number)
+        if not digits:
+            return None
+        with self._lock:
+            return self._veriphone_cache.get(digits)
+
+    def _phone_verdict(self, number: str) -> VeriphoneResult | None:
+        """GET /v2/verify, cached by digits. None if unconfigured or HTTP failed."""
+        raw = (number or "").strip()
+        if not raw:
+            return None
+        digits = self._phone_digits(raw)
+        if digits:
+            with self._lock:
+                if digits in self._veriphone_cache:
+                    return self._veriphone_cache[digits]
+        if not self.veriphone.enabled:
+            return None
+        assert_capability(CAP_PHONE, vendor="waterfall", endpoint="veriphone")
+        result = self.veriphone.verify(raw)
+        if digits:
+            with self._lock:
+                self._veriphone_cache[digits] = result
+        return result
+
     def _accept_phone(
         self,
         phone: str,
@@ -661,45 +723,28 @@ class Waterfall:
         source_tier: str,
         raw: dict[str, Any] | None = None,
     ) -> PhoneHit | None:
-        """On need='phone', keep the number only when Veriphone says mobile."""
+        """On need='phone' (or verify_only), keep the number only when mobile."""
         number = (phone or "").strip()
         if not number:
             return None
-        if not self._phone_only():
+        if not self._should_verify_phone():
             return PhoneHit(phone=number, source_tier=source_tier, raw=raw or {})
-
-        digits = "".join(c for c in number if c.isdigit())
-        if digits:
-            with self._lock:
-                if digits in self._veriphone_cache:
-                    cached = self._veriphone_cache[digits]
-                    if cached is None:
-                        return None
-                    merged = dict(raw or {})
-                    merged.update(cached.raw or {})
-                    return PhoneHit(
-                        phone=cached.phone, source_tier=source_tier, raw=merged
-                    )
 
         if not self.veriphone.enabled:
             self._bump("veriphone", "skipped_unconfigured")
             return PhoneHit(phone=number, source_tier=source_tier, raw=raw or {})
 
-        assert_capability(CAP_PHONE, vendor="waterfall", endpoint="veriphone")
-        checked = self.veriphone.check_mobile(number)
-        if checked:
+        result = self._phone_verdict(number)
+        if result is not None and result.is_mobile:
             self._bump("veriphone", "phone_hits")
             merged = dict(raw or {})
-            merged["veriphone"] = checked.raw
-            hit = PhoneHit(phone=checked.phone, source_tier=source_tier, raw=merged)
-            if digits:
-                with self._lock:
-                    self._veriphone_cache[digits] = hit
-            return hit
+            merged["veriphone"] = result.raw
+            return PhoneHit(
+                phone=result.e164 or result.phone,
+                source_tier=source_tier,
+                raw=merged,
+            )
         self._bump("veriphone", "rejected")
-        if digits:
-            with self._lock:
-                self._veriphone_cache[digits] = None
         return None
 
     def resolve_phone(
@@ -795,19 +840,30 @@ class Waterfall:
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
+def _phone_type_of(wf: Waterfall, *numbers: str) -> str:
+    for number in numbers:
+        verdict = wf.cached_phone_verdict(number or "")
+        if verdict is not None:
+            return verdict.phone_type
+    return ""
+
+
 def _company_contact_rows(
     client: ClientConfig,
     item: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     row = item["row"]
     email = item["email"]
     email_tier = item["email_tier"]
     dm_tier = item["dm_tier"]
     person = item["person"]
+    domain = row.get("domain") or ""
+    if not domain:
+        return None, None
 
     company = supabase_sync.company_row(
         client_tag=client.tag,
-        domain=row["domain"],
+        domain=domain,
         company_name=row.get("company_name") or "",
         source=row.get("source") or "waterfall",
         place=row.get("place_id") or "",
@@ -828,12 +884,13 @@ def _company_contact_rows(
         first = person.first_name or first
         last = person.last_name or last
         title = person.title or title
-    cellphone = item.get("phone") or row.get("phone") or ""
+    cellphone = item.get("phone") or ""
+    line_type = item.get("phone_type") or ""
     contact: dict[str, Any] | None = None
-    if first or last or email or cellphone:
+    if first or last or email or cellphone or line_type:
         contact = supabase_sync.contact_row(
             client_tag=client.tag,
-            domain=row["domain"],
+            domain=domain,
             first_name=first,
             last_name=last,
             job_title=title,
@@ -843,14 +900,49 @@ def _company_contact_rows(
             or row.get("linkedin_url")
             or "",
             cellphone=cellphone,
+            line_type=line_type,
             contact_city=row.get("city") or "",
             contact_state=row.get("state") or "",
-            source_tool=email_tier or dm_tier or "waterfall",
-            source_tier=email_tier or dm_tier,
+            source_tool=email_tier or dm_tier or item.get("phone_tier") or "waterfall",
+            source_tier=email_tier or dm_tier or item.get("phone_tier") or "",
             place_id=row.get("place_id") or "",
-            confidence=0.7 if email or dm_tier else 0.0,
+            confidence=0.7 if email or dm_tier or cellphone else 0.0,
         )
     return company, contact
+
+
+def _verify_only_row(wf: Waterfall, row: dict[str, Any]) -> dict[str, Any]:
+    """Veriphone an existing number. No finder HTTP."""
+    email = row.get("email") or ""
+    existing = (row.get("phone") or "").strip()
+    phone = existing
+    phone_type = ""
+    phone_tier = "input" if existing else ""
+    with using_need("phone"):
+        if existing and not wf.veriphone.enabled:
+            wf._bump("veriphone", "skipped_unconfigured")
+        elif existing:
+            result = wf._phone_verdict(existing)
+            if result is not None:
+                phone_type = result.phone_type
+                phone_tier = "veriphone"
+                if result.is_mobile:
+                    phone = result.e164 or result.phone
+                    row["phone"] = phone
+                    wf._bump("veriphone", "phone_hits")
+                else:
+                    wf._bump("veriphone", "rejected")
+    return {
+        "row": row,
+        "email": email,
+        "email_tier": "input" if email else "",
+        "dm_tier": "",
+        "person": None,
+        "phone": phone,
+        "phone_checked": existing,
+        "phone_type": phone_type,
+        "phone_tier": phone_tier,
+    }
 
 
 def _enrich_one_row(
@@ -860,6 +952,8 @@ def _enrich_one_row(
     need_norm: str,
     include_fullenrich: bool,
 ) -> dict[str, Any]:
+    if wf.verify_only:
+        return _verify_only_row(wf, row)
     with using_need(need_norm):
         email = row.get("email") or ""
         email_tier = "input" if email else ""
@@ -868,6 +962,7 @@ def _enrich_one_row(
         want_dm = allows(need_norm, CAP_PEOPLE)
         want_email = allows(need_norm, CAP_EMAIL)
         want_phone = allows(need_norm, CAP_PHONE)
+        original_phone = (row.get("phone") or "").strip()
 
         if want_dm:
             person = wf.resolve_dm(row)
@@ -917,6 +1012,15 @@ def _enrich_one_row(
             wf.record_phone_skips(row, email=email)
             phone = row.get("phone") or ""
 
+        phone_type = ""
+        raw_vp = ((phone_hit.raw if phone_hit else {}) or {}).get("veriphone") or {}
+        if isinstance(raw_vp, dict):
+            phone_type = str(raw_vp.get("phone_type") or "")
+        if not phone_type:
+            phone_type = _phone_type_of(
+                wf, phone, original_phone, row.get("phone") or ""
+            )
+
         return {
             "row": row,
             "email": email,
@@ -924,6 +1028,8 @@ def _enrich_one_row(
             "dm_tier": dm_tier,
             "person": person,
             "phone": phone,
+            "phone_checked": original_phone or phone,
+            "phone_type": phone_type,
             "phone_tier": phone_hit.source_tier if phone_hit else "",
         }
 
@@ -936,7 +1042,13 @@ def _int_attr(obj: Any, name: str) -> int:
         return 0
 
 
-def _tier_warnings(tier_stats: dict[str, dict[str, Any]], *, need_norm: str = "both", veriphone_enabled: bool = True) -> list[str]:
+def _tier_warnings(
+    tier_stats: dict[str, dict[str, Any]],
+    *,
+    need_norm: str = "both",
+    veriphone_enabled: bool = True,
+    verify_only: bool = False,
+) -> list[str]:
     """Surface a tier that is failing, not merely missing. 0 hits + 2000 errors must not look quiet."""
     warnings: list[str] = []
     for name, stats in tier_stats.items():
@@ -944,7 +1056,7 @@ def _tier_warnings(tier_stats: dict[str, dict[str, Any]], *, need_norm: str = "b
         errors = int(stats.get("errors") or 0)
         if calls >= 10 and errors * 2 > calls:
             warnings.append(name)
-    if need_norm == "phone" and not veriphone_enabled:
+    if (need_norm == "phone" or verify_only) and not veriphone_enabled:
         warnings.append("veriphone_unconfigured")
     return warnings
 
@@ -1015,6 +1127,7 @@ def _result_payload(
         wf.tier_stats,
         need_norm=need_norm,
         veriphone_enabled=bool(getattr(wf.veriphone, "enabled", False)),
+        verify_only=bool(getattr(wf, "verify_only", False)),
     )
     out: dict[str, Any] = {
         "rows_in": parsed_count,
@@ -1023,6 +1136,7 @@ def _result_payload(
         "emails_found": emails_found,
         "dms_found": dms_found,
         "phones_found": phones_found,
+        "verify_only": bool(getattr(wf, "verify_only", False)),
         "phones_rejected_not_mobile": int(
             (wf.tier_stats.get("veriphone") or {}).get("rejected") or 0
         ),
@@ -1060,14 +1174,38 @@ def _maybe_writeback(src: table_source.TableSource | None, item: dict[str, Any])
     if src is None:
         return
     email = item.get("email") or ""
+    phone = item.get("phone") or item.get("phone_checked") or ""
+    phone_type = item.get("phone_type") or ""
+    found = bool(email or item.get("phone"))
     table_source.writeback_result(
         src,
         key=item["row"].get("_source_key"),
-        status="found" if email else "not_found",
+        status="found" if found else "not_found",
         email=email,
         email_status="found" if email else "not_found",
-        vendor=item.get("email_tier") or item.get("dm_tier") or "",
+        vendor=item.get("email_tier")
+        or item.get("phone_tier")
+        or item.get("dm_tier")
+        or "",
+        phone=phone,
+        phone_type=phone_type,
     )
+
+
+def _write_company_contact(
+    client: ClientConfig,
+    item: dict[str, Any],
+    *,
+    write_supabase: bool,
+) -> tuple[int, int]:
+    company, contact = _company_contact_rows(client, item)
+    companies = 0
+    contacts = 0
+    if write_supabase and company:
+        companies = supabase_sync.upsert_companies(client, [company])
+        if contact:
+            contacts = supabase_sync.upsert_contacts(client, [contact])
+    return companies, contacts
 
 
 def _enrich_waterfall_serial(
@@ -1089,7 +1227,8 @@ def _enrich_waterfall_serial(
     for idx, row in enumerate(parsed):
         item = _enrich_one_row(wf, row, need_norm=need_norm, include_fullenrich=False)
         if (
-            allows(need_norm, CAP_EMAIL)
+            not wf.verify_only
+            and allows(need_norm, CAP_EMAIL)
             and not item["email"]
             and row["first_name"]
             and row["last_name"]
@@ -1127,6 +1266,9 @@ def _enrich_waterfall_serial(
                         if phone_hit:
                             enriched[idx]["phone"] = phone_hit.phone
                             enriched[idx]["phone_tier"] = phone_hit.source_tier
+                            raw_vp = (phone_hit.raw or {}).get("veriphone") or {}
+                            if isinstance(raw_vp, dict) and raw_vp.get("phone_type"):
+                                enriched[idx]["phone_type"] = raw_vp["phone_type"]
                             if not enriched[idx]["row"].get("phone"):
                                 enriched[idx]["row"]["phone"] = phone_hit.phone
                     elif not allows(need_norm, CAP_PHONE):
@@ -1149,17 +1291,12 @@ def _enrich_waterfall_serial(
             dms_found += 1
         if item.get("phone"):
             phones_found += 1
-        company, contact = _company_contact_rows(client, item)
+        upserted, written = _write_company_contact(
+            client, item, write_supabase=write_supabase
+        )
+        companies_upserted += upserted
+        contacts_written += written
         _maybe_writeback(table_src, item)
-        if write_supabase:
-            companies_upserted += supabase_sync.upsert_companies(client, [company])
-            if contact:
-                if contact.get("email"):
-                    contacts_written += supabase_sync.insert_contacts_ignore_conflict(
-                        client, [contact]
-                    )
-                else:
-                    contacts_written += supabase_sync.insert_contacts(client, [contact])
         if progress_callback:
             progress_callback(
                 _result_payload(
@@ -1253,19 +1390,10 @@ def _enrich_waterfall_parallel(
             need_norm=need_norm,
             include_fullenrich=True,
         )
-        company, contact = _company_contact_rows(client, item)
+        upserted, written = _write_company_contact(
+            client, item, write_supabase=write_supabase
+        )
         _maybe_writeback(table_src, item)
-        upserted = 0
-        written = 0
-        if write_supabase:
-            upserted = supabase_sync.upsert_companies(client, [company])
-            if contact:
-                if contact.get("email"):
-                    written = supabase_sync.insert_contacts_ignore_conflict(
-                        client, [contact]
-                    )
-                else:
-                    written = supabase_sync.insert_contacts(client, [contact])
         with progress_lock:
             counters["companies_done"] += 1
             counters["companies_upserted"] += upserted
@@ -1319,8 +1447,13 @@ def enrich_waterfall(
     where: str | None = None,
     estimate_only: bool = False,
     writeback: bool | None = None,
+    verify_only: bool = False,
 ) -> dict[str, Any]:
-    """Walk paid vendors per row; upsert isolated client tables; return counts."""
+    """Walk paid vendors per row; upsert isolated client tables; return counts.
+
+    verify_only=True checks existing phone numbers with Veriphone and writes
+    wf_phone / wf_phone_type (and contacts.line_type). Finder HTTP is skipped.
+    """
     client = ensure_client(
         client_tag,
         write_supabase=bool(write_supabase) and not estimate_only,
@@ -1358,9 +1491,20 @@ def enrich_waterfall(
     parsed = [_norm_row(r) for r in raw_rows]
     if estimate_only:
         return estimate_waterfall(
-            parsed, max_tier=max_tier_n, need=need_norm, client=client
+            parsed,
+            max_tier=max_tier_n,
+            need=need_norm,
+            client=client,
+            verify_only=bool(verify_only),
         )
-    parsed = [r for r in parsed if r.get("domain") or r.get("mode") == "name_company"]
+    if verify_only:
+        parsed = [
+            r
+            for r in parsed
+            if r.get("phone") or r.get("domain") or r.get("mode") == "name_company"
+        ]
+    else:
+        parsed = [r for r in parsed if r.get("domain") or r.get("mode") == "name_company"]
     if not parsed:
         return {
             "rows_in": 0,
@@ -1382,6 +1526,7 @@ def enrich_waterfall(
             "target_titles": titles,
             "require_title_match": bool(require_title_match),
             "modes": classify_rows([]),
+            "verify_only": bool(verify_only),
         }
 
     if table_src and table_src.writeback:
@@ -1393,6 +1538,7 @@ def enrich_waterfall(
         fallback_titles=client.fallback_titles,
         require_title_match=bool(require_title_match),
         need=need_norm,
+        verify_only=bool(verify_only),
     )
     wf.modes = classify_rows(parsed)
 
