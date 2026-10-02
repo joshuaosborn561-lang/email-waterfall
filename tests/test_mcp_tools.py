@@ -57,4 +57,6 @@ def test_enrich_waterfall_has_source_and_estimate_only() -> None:
     assert "where" in params
     assert "estimate_only" in params
     assert "writeback" in params
+    assert "verify_only" in params
+    assert params["verify_only"].default is False
     assert params["rows"].default is None

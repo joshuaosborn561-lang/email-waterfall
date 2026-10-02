@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from email_waterfall.clients import CLIENTS
 from email_waterfall.supabase_sync import (
     company_row,
     contact_row,
     dedupe_companies,
     dedupe_contacts_with_email,
+    upsert_contacts,
 )
 
 
@@ -77,3 +79,46 @@ def test_contact_email_dedupe() -> None:
     out = dedupe_contacts_with_email(with_email)
     assert len(out) == 1
     assert out[0]["job_title"] == "Service Director"
+
+
+def test_contact_row_includes_line_type() -> None:
+    row = contact_row(
+        client_tag="peterson",
+        domain="roofco.com",
+        first_name="Jane",
+        last_name="Smith",
+        cellphone="+19725550111",
+        line_type="Mobile",
+    )
+    assert row["cellphone"] == "+19725550111"
+    assert row["line_type"] == "mobile"
+
+
+def test_upsert_contacts_merges_existing_email_rows(monkeypatch) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_request(method, path, **kwargs):
+        calls.append((method, path, str(kwargs.get("prefer") or "")))
+        return 200, ""
+
+    monkeypatch.setattr(
+        "email_waterfall.supabase_sync._request", fake_request
+    )
+    written = upsert_contacts(
+        CLIENTS["peterson"],
+        [
+            contact_row(
+                client_tag="peterson",
+                domain="roofco.com",
+                first_name="Jane",
+                last_name="Smith",
+                email="jane@roofco.com",
+                cellphone="+19725550111",
+                line_type="mobile",
+            )
+        ],
+    )
+    assert written == 1
+    assert "on_conflict=domain,email" in calls[0][1]
+    assert "merge-duplicates" in calls[0][2]
+    assert "ignore-duplicates" not in calls[0][2]

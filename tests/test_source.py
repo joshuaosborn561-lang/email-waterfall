@@ -138,6 +138,24 @@ def test_discover_maps_owner_title_and_candidate_email(monkeypatch) -> None:
     assert src.column_map["domain"] == "domain"
 
 
+def test_discover_maps_phone_aliases(monkeypatch) -> None:
+    src = table_source.parse_source({"table": "client_peterson.email_resolution"})
+    monkeypatch.setattr(
+        table_source,
+        "list_table_columns",
+        lambda _src: {
+            "id",
+            "first_name",
+            "last_name",
+            "company_name",
+            "cellphone",
+            "wf_phone",
+        },
+    )
+    table_source.discover_column_map(src)
+    assert src.column_map["phone"] == "cellphone"
+
+
 def test_fetch_pages_500(monkeypatch) -> None:
     src = table_source.parse_source(
         {
@@ -211,6 +229,36 @@ def test_writeback_patches_wf_columns(monkeypatch) -> None:
     assert body["candidate_email"] == "jane@org.org"
     assert body["dl_provider"] == "leadmagic"
     assert "wf_updated_at" in body
+    assert "wf_phone" not in body
+
+
+def test_writeback_patches_wf_phone_and_type(monkeypatch) -> None:
+    src = table_source.parse_source(
+        {"project_id": "kemvxzhcxvynmoutwdrh", "table": "ew_names_ready"}
+    )
+    src._present_writeback = set(table_source.ALL_WRITEBACK_COLUMNS)
+    calls: list[tuple[str, str, dict]] = []
+
+    def fake_request(method, path, **kwargs):
+        calls.append((method, path, kwargs.get("body") or {}))
+        return 200, ""
+
+    monkeypatch.setattr(table_source, "resolve_credentials", lambda pid: ("https://x", "k"))
+    monkeypatch.setattr(table_source.supabase_sync, "request_on", fake_request)
+    table_source.writeback_result(
+        src,
+        key=42,
+        status="found",
+        email="",
+        email_status="not_found",
+        vendor="aiark",
+        phone="+19725550111",
+        phone_type="mobile",
+    )
+    body = calls[0][2]
+    assert body["wf_phone"] == "+19725550111"
+    assert body["wf_phone_type"] == "mobile"
+    assert body["wf_status"] == "found"
 
 
 def test_writeback_dl_status_without_wf_columns(monkeypatch) -> None:

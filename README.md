@@ -38,7 +38,9 @@ AI Ark is next on **people, email, and cellphone** (not people-only):
 
 LeadMagic mobile-finder runs after AI Ark when a LinkedIn URL or work email is available. Prospeo `enrich_mobile` only runs if `max_tier` is raised to `prospeo` or `fullenrich`.
 
-On `need='phone'` only, every candidate number (input or vendor) is checked with Veriphone `GET /v2/verify`. A number is written as cellphone only when `phone_valid` is true and `phone_type` is `mobile`. Landline / voip / invalid are dropped and the next finder is tried. Set `VERIPHONE_API_KEY`. `need='both'` and `need='email'` skip Veriphone.
+On `need='phone'` only, every candidate number (input or vendor) is checked with Veriphone `GET /v2/verify`. A number is written as cellphone only when `phone_valid` is true and `phone_type` is `mobile`. Landline / voip / invalid are dropped and the next finder is tried. The number and Veriphone `phone_type` are written back to the source table as `wf_phone` / `wf_phone_type` and to `{client}_*contacts.line_type`. Existing contact rows are **updated** on `(domain, email)`, not skipped. Set `VERIPHONE_API_KEY`. `need='both'` and `need='email'` skip Veriphone unless `verify_only=true`.
+
+`verify_only=true` checks numbers already on the row with Veriphone and writes the verdict. Finder HTTP is skipped — use it to classify numbers you already have without paying AI Ark / LeadMagic again.
 
 `max_tier` default is `leadmagic` (alias `lm`). Raise it to `prospeo` / `fullenrich` (alias `fe`) if you want later paid email tiers.
 
@@ -103,7 +105,7 @@ Richer `source` object still works:
 }
 ```
 
-`source` is read server-side with the service role, paged 500 rows at a time. Results still write `public.{client_tag}_wf_contacts`. Writeback patches the queue per row: `dl_status` / `candidate_email` / `dl_provider` when those columns exist (Peterson `email_resolution`), plus `wf_*` when present. Resume with `where: "dl_status is null"`.
+`source` is read server-side with the service role, paged 500 rows at a time. Results still write `public.{client_tag}_wf_contacts`. Writeback patches the queue per row: `dl_status` / `candidate_email` / `dl_provider` when those columns exist (Peterson `email_resolution`), plus `wf_*` when present (`wf_phone` / `wf_phone_type` for phone hits). Resume with `where: "dl_status is null"`.
 
 Smartlead 429 / rate-limit backs off and retries. It does not set `credits_exhausted` while used is still below total. Finder calls share one process-wide semaphore (default `SMARTLEAD_CONCURRENCY=3`), including across background jobs.
 
@@ -118,8 +120,9 @@ Other tools: `health`, `ensure_client`, `list_clients`, `describe_client`, `get_
 Project: `campaignintelligence` (`azpapwtnrbzywlnxxecz`)
 
 - Companies upsert on `domain`. Duplicate domains in one batch are merged first (avoids Postgres `21000`).
-- Contacts with email: `ON CONFLICT (domain, email) DO NOTHING`.
+- Contacts with email: `ON CONFLICT (domain, email) DO UPDATE` (merge; cellphone + `line_type` refresh).
 - Null-email contacts insert separately (no conflict target).
+- `line_type` is added on `{client}_*contacts` via `ew_ensure_contact_columns` (also in migration 005).
 
 ## Local run
 

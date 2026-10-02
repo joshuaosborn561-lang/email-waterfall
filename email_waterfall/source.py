@@ -20,6 +20,8 @@ WRITEBACK_COLUMNS = (
     "wf_email_status",
     "wf_vendor",
     "wf_updated_at",
+    "wf_phone",
+    "wf_phone_type",
 )
 QUEUE_WRITE_COLUMNS = (
     "dl_status",
@@ -36,6 +38,7 @@ OPTIONAL_MAP_FIELDS = (
     "city",
     "state",
     "place_id",
+    "phone",
 )
 MAP_FIELDS = REQUIRED_MAP_FIELDS + OPTIONAL_MAP_FIELDS
 FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
@@ -48,6 +51,7 @@ FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
     "city": ("city", "address_city"),
     "state": ("state", "address_state"),
     "place_id": ("place_id",),
+    "phone": ("phone", "cellphone", "mobile", "wf_phone"),
 }
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -579,6 +583,8 @@ def writeback_result(
     email: str = "",
     email_status: str = "",
     vendor: str = "",
+    phone: str = "",
+    phone_type: str = "",
 ) -> None:
     if key in (None, "") or not src.writeback:
         return
@@ -586,6 +592,8 @@ def writeback_result(
     email_n = (email or "").strip().lower() or None
     vendor_n = vendor or None
     status_n = status or None
+    phone_n = (phone or "").strip() or None
+    phone_type_n = (phone_type or "").strip().lower() or None
     body = {
         "wf_status": status_n,
         "wf_email": email_n,
@@ -596,6 +604,9 @@ def writeback_result(
         "candidate_email": email_n,
         "dl_provider": vendor_n,
     }
+    if phone_n or phone_type_n:
+        body["wf_phone"] = phone_n
+        body["wf_phone_type"] = phone_type_n
     present = existing_columns(src)
     body = {k: v for k, v in body.items() if k in present}
     if not body:

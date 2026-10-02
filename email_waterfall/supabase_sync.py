@@ -3,7 +3,7 @@
 Hard rules:
 - client_tag required; never a shared contacts table
 - companies upsert on domain, after deduping the batch by domain
-- contacts with email → ignore-duplicates on (domain, email)
+- contacts with email → merge-duplicates on (domain, email)
 - null-email contacts insert separately (no ON CONFLICT)
 """
 
@@ -205,9 +205,14 @@ def upsert_companies(client: ClientConfig, rows: list[dict[str, Any]]) -> int:
     return written
 
 
+def _omit_nones(row: dict[str, Any]) -> dict[str, Any]:
+    """Drop nulls so a merge-upsert does not wipe columns we did not set."""
+    return {k: v for k, v in row.items() if v is not None}
+
+
 def insert_contacts(client: ClientConfig, rows: list[dict[str, Any]]) -> int:
     """Insert null-email rows. Do not use ON CONFLICT — email is null."""
-    clean = [r for r in rows if not (r.get("email") or "").strip()]
+    clean = [_omit_nones(r) for r in rows if not (r.get("email") or "").strip()]
     if not clean:
         return 0
     written = 0
@@ -222,23 +227,65 @@ def insert_contacts(client: ClientConfig, rows: list[dict[str, Any]]) -> int:
     return written
 
 
-def insert_contacts_ignore_conflict(
+def upsert_contacts(client: ClientConfig, rows: list[dict[str, Any]]) -> int:
+    """Insert or update contacts. Email rows merge on UNIQUE (domain, email)."""
+    with_email = [_omit_nones(r) for r in dedupe_contacts_with_email(rows)]
+    without = [r for r in rows if not (r.get("email") or "").strip()]
+    written = 0
+    if with_email:
+        written += _upsert_contacts_with_email(client, with_email)
+    if without:
+        written += insert_contacts(client, without)
+    return written
+
+
+def _upsert_contacts_with_email(
     client: ClientConfig, rows: list[dict[str, Any]]
 ) -> int:
-    """Ignore duplicates on UNIQUE (domain, email). Email must be non-null."""
-    clean = dedupe_contacts_with_email(rows)
-    if not clean:
+    if not rows:
         return 0
     written = 0
-    for batch in _chunks(clean):
+    for batch in _chunks(rows):
         _request(
             "POST",
             f"{client.contacts_table}?on_conflict=domain,email",
             body=batch,
-            prefer="resolution=ignore-duplicates,return=minimal",
+            prefer="resolution=merge-duplicates,return=minimal",
         )
         written += len(batch)
     return written
+
+
+def insert_contacts_ignore_conflict(
+    client: ClientConfig, rows: list[dict[str, Any]]
+) -> int:
+    """Update existing (domain, email) rows instead of skipping them."""
+    return upsert_contacts(client, rows)
+
+
+def ensure_contact_columns(client: ClientConfig) -> list[str]:
+    """Add line_type (and any future contact columns) on {client}_*contacts."""
+    needed = ["line_type"]
+    try:
+        rpc(
+            "ew_ensure_contact_columns",
+            {"p_table": client.contacts_table, "columns": needed},
+        )
+        return needed
+    except Exception:
+        pass
+    try:
+        rpc(
+            "ew_ensure_wf_writeback",
+            {
+                "schema_name": "public",
+                "table_name": client.contacts_table,
+                "columns": needed,
+            },
+        )
+        return needed
+    except Exception:
+        return []
 
 
 def _job_level(title: str) -> str:
@@ -305,6 +352,7 @@ def contact_row(
     email: str = "",
     email_status: str = "",
     cellphone: str = "",
+    line_type: str = "",
     linkedin_url: str = "",
     contact_city: str = "",
     contact_state: str = "",
@@ -326,6 +374,7 @@ def contact_row(
         "email": (email or "").strip().lower() or None,
         "email_status": email_status or None,
         "cellphone": cellphone or None,
+        "line_type": (line_type or "").strip().lower() or None,
         "linkedin_url": linkedin_url or None,
         "contact_city": contact_city or None,
         "contact_state": contact_state or None,
