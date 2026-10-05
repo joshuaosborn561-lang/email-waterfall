@@ -1458,7 +1458,7 @@ def enrich_waterfall(
     parallel: bool = True,
     progress_callback: ProgressCallback | None = None,
     source: Any = None,
-    source_table: str | None = None,
+    source_table: Any = None,
     where: str | None = None,
     estimate_only: bool = False,
     writeback: bool | None = None,

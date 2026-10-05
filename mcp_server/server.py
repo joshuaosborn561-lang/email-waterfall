@@ -31,6 +31,21 @@ def _json(data: Any) -> str:
     return json.dumps(data, indent=2, default=str)
 
 
+def _table_ref(source: Any, source_table: Any) -> str | None:
+    if isinstance(source_table, str) and source_table.strip():
+        return source_table.strip()
+    if isinstance(source_table, dict):
+        name = str(source_table.get("table") or source_table.get("source_table") or "").strip()
+        if name:
+            return name
+    if isinstance(source, str) and source.strip():
+        return source.strip()
+    if isinstance(source, dict):
+        name = str(source.get("table") or source.get("source_table") or "").strip()
+        return name or None
+    return None
+
+
 def _ensure_repo_cwd() -> None:
     os.chdir(ROOT)
 
@@ -399,8 +414,8 @@ def enrich_waterfall(
     require_title_match: bool = True,
     background: bool = True,
     source: dict[str, Any] | str | None = None,
-    source_table: str = "",
-    where: str = "",
+    source_table: str | dict[str, Any] | None = None,
+    where: str | None = None,
     estimate_only: bool = False,
     writeback: bool = True,
     verify_only: bool = False,
@@ -473,8 +488,8 @@ def enrich_waterfall(
             write_supabase=not estimate_only,
             progress_callback=progress_callback,
             source=source,
-            source_table=source_table or None,
-            where=where or None,
+            source_table=source_table,
+            where=where,
             estimate_only=bool(estimate_only),
             writeback=bool(writeback) and not estimate_only,
             verify_only=bool(verify_only),
@@ -490,7 +505,7 @@ def enrich_waterfall(
 
     if estimate_only:
         return _json(_run_enrich())
-    if source not in (None, "", {}) or (source_table or "").strip():
+    if source not in (None, "", {}, []) or source_table not in (None, "", {}, []):
         rows_chars = 50_000
     else:
         rows_chars = (
@@ -508,10 +523,7 @@ def enrich_waterfall(
                 "verify_only": bool(verify_only),
                 "client_tag": client.tag,
                 "rows_chars": rows_chars,
-                "source_table": (source_table or "").strip()
-                or (
-                    (source or {}).get("table") if isinstance(source, dict) else None
-                ),
+                "source_table": _table_ref(source, source_table),
             },
         )
         return _json(

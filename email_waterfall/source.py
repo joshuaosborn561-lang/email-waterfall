@@ -168,36 +168,56 @@ def split_qualified(name: str, default_schema: str = "public") -> tuple[str, str
     return default, raw
 
 
+def _load_object_or_table(value: Any, *, label: str) -> dict[str, Any]:
+    """Accept a table name, JSON object string, or dict. Never json.loads a table name."""
+    if value in (None, "", {}, []):
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        if text[0] == "{":
+            try:
+                parsed = json.loads(text)
+            except ValueError as exc:
+                raise ValueError(f"{label} must be a table name or JSON object") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError(f"{label} must be an object")
+            return parsed
+        return {"table": text}
+    raise ValueError(f"{label} must be a table name or object")
+
+
 def coerce_source(
     source: Any = None,
     *,
-    source_table: str | None = None,
+    source_table: Any = None,
     where: str | None = None,
     writeback: bool | None = None,
 ) -> dict[str, Any] | None:
-    """Merge Maps-style source_table/where with the richer source object."""
-    table = (source_table or "").strip()
+    """Merge Maps-style source_table/where with the richer source object.
+
+    Hosts send any mix of: table-name string, JSON object string, dict,
+    or null for the unused companion field. A bare `schema.table` string
+    on `source` is a table ref, not JSON.
+    """
+    raw = _load_object_or_table(source, label="source")
+    extra = _load_object_or_table(source_table, label="source_table")
+    for key, val in extra.items():
+        if key in ("table", "source_table") or key not in raw:
+            raw[key] = val
+    table = str(raw.get("table") or raw.get("source_table") or "").strip()
+    if table:
+        raw["table"] = table
     where_s = "" if where is None else str(where).strip()
-    if source in (None, "", {}):
-        if not table:
-            return None
-        raw: dict[str, Any] = {"table": table}
-    elif isinstance(source, str):
-        raw = json.loads(source) if source.strip() else {}
-        if not isinstance(raw, dict):
-            raise ValueError("source must be an object")
-        if table:
-            raw["table"] = table
-    elif isinstance(source, dict):
-        raw = dict(source)
-        if table:
-            raw["table"] = table
-    else:
-        raise ValueError("source must be an object")
     if where_s:
         raw["where"] = where_s
     if writeback is not None:
         raw["writeback"] = bool(writeback)
+    if not str(raw.get("table") or raw.get("source_table") or "").strip():
+        return None
     return raw
 
 
