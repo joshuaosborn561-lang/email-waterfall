@@ -122,3 +122,26 @@ def test_invalid_grant_sets_auth_failed_and_disables() -> None:
 
     client = GetLeadsClient(token_manager=mgr)
     assert client.enabled is False
+
+
+def test_api_key_enables_without_refresh_token() -> None:
+    store = MemoryTokenStore()
+
+    def request_fn(tier, method, url, **kwargs):
+        raise AssertionError("API key path must not call oauth/token")
+
+    mgr = OAuthTokenManager(
+        "getleads",
+        store=store,
+        client_id="",
+        refresh_token="",
+        api_key="gl_test_key",
+        request_fn=request_fn,
+    )
+    assert mgr.has_api_key is True
+    assert mgr.has_refresh_token is False
+    assert mgr.access_token() == "gl_test_key"
+    from email_waterfall.vendors.getleads import GetLeadsClient
+
+    client = GetLeadsClient(token_manager=mgr)
+    assert client.enabled is True

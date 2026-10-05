@@ -72,8 +72,9 @@ LeadMagic → Prospeo → FullEnrich.
 Default max_tier is **leadmagic** (alias `lm`). Prospeo and FullEnrich do not
 run unless you raise max_tier.
 
-getleads has no REST API and no API key. Bootstrap with
-`python scripts/getleads_auth.py`. Discovery of new leads (geo + industry +
+getleads is first. `GETLEADS_API_KEY` is a Bearer on the GetLeads MCP
+(`https://app.getleads.io/api/mcp`). OAuth refresh tokens also work
+(`python scripts/getleads_auth.py`). Discovery of new leads (geo + industry +
 seniority + headcount) is `getleads_search`. Enrichment still walks the
 waterfall. Vendor HTTP errors increment `errors` and, at ≥50% of calls
 (n≥10), appear in job `warnings`.

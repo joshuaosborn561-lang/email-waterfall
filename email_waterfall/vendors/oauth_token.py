@@ -118,6 +118,7 @@ class OAuthTokenManager:
         resource: str = GETLEADS_RESOURCE,
         client_id: str | None = None,
         refresh_token: str | None = None,
+        api_key: str | None = None,
         request_fn=None,
     ):
         self.vendor = vendor
@@ -130,6 +131,7 @@ class OAuthTokenManager:
         self._access_expires_at = 0.0
         self._refresh_token = refresh_token or settings.getleads_refresh_token
         self._client_id = client_id or settings.getleads_client_id
+        self._api_key = api_key if api_key is not None else settings.getleads_api_key
         self.auth_failed = False
         self.auth_failed_reason: str | None = None
         self._seed_from_store_or_env()
@@ -182,6 +184,10 @@ class OAuthTokenManager:
         return bool(self._refresh_token and self._client_id) and not self.auth_failed
 
     @property
+    def has_api_key(self) -> bool:
+        return bool(self._api_key) and not self.auth_failed
+
+    @property
     def client_id(self) -> str:
         return self._client_id
 
@@ -194,9 +200,15 @@ class OAuthTokenManager:
         if self.auth_failed:
             raise RuntimeError(self.auth_failed_reason or "getleads auth_failed")
         with self._lock:
-            if self._access_token and (self._access_expires_at - time.time()) > 60:
-                return self._access_token
-            return self._refresh_locked()
+            if self.has_refresh_token:
+                if self._access_token and (self._access_expires_at - time.time()) > 60:
+                    return self._access_token
+                return self._refresh_locked()
+            if self._api_key:
+                return self._api_key
+            self.auth_failed = True
+            self.auth_failed_reason = "missing_refresh_token"
+            raise RuntimeError("getleads missing refresh token")
 
     def _refresh_locked(self) -> str:
         if self.auth_failed:

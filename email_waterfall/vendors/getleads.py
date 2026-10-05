@@ -443,23 +443,30 @@ class GetLeadsClient:
     @property
     def enabled(self) -> bool:
         mgr = self._manager()
-        return bool(mgr.has_refresh_token) and not mgr.auth_failed
+        return (
+            bool(mgr.has_refresh_token or getattr(mgr, "has_api_key", False))
+            and not mgr.auth_failed
+        )
 
     def health_snapshot(self) -> dict[str, Any]:
         mgr = self._manager()
-        configured = bool(mgr.has_refresh_token or mgr.client_id)
+        has_key = bool(getattr(mgr, "has_api_key", False))
+        configured = bool(mgr.has_refresh_token or has_key or mgr.client_id)
+        auth_mode = "oauth" if mgr.has_refresh_token else ("api_key" if has_key else None)
         if mgr.auth_failed:
             return {
                 "configured": configured,
                 "auth_ok": False,
                 "reason": mgr.auth_failed_reason,
+                "auth": auth_mode,
                 "tools": None,
             }
-        if not mgr.has_refresh_token:
+        if not mgr.has_refresh_token and not has_key:
             return {
                 "configured": False,
                 "auth_ok": False,
                 "reason": "missing_refresh_token",
+                "auth": None,
                 "tools": None,
             }
         try:
@@ -468,6 +475,7 @@ class GetLeadsClient:
                 "configured": True,
                 "auth_ok": True,
                 "reason": None,
+                "auth": auth_mode,
                 "tools": len(tools),
             }
         except Exception as exc:
@@ -475,6 +483,7 @@ class GetLeadsClient:
                 "configured": True,
                 "auth_ok": False,
                 "reason": str(exc)[:200],
+                "auth": auth_mode,
                 "tools": None,
             }
 
