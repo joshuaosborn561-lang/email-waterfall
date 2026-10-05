@@ -26,7 +26,7 @@ Peterson / default owner titles: Owner, Founder, Principal, President, Partner, 
 getleads → Smartlead → AI Ark → LeadMagic → Prospeo → FullEnrich
 ```
 
-**getleads** is an OAuth 2.1 MCP (`https://app.getleads.io/api/mcp`), not a REST API. There is no API key. A person runs `python scripts/getleads_auth.py` once; the server then keeps itself authorized with the rotating refresh token in `public.ew_vendor_oauth_tokens`. Discovery (geography + industry + seniority + headcount) goes through the MCP tool `getleads_search`, which maps onto whatever people/lead-search tool `tools/list` actually exposes. `find_email` / `find_people` in the waterfall use the same live catalog — they return nothing (and log once) if no matching tool exists. Non-2xx and `isError` increment `tier_stats.*.errors` and never look like a quiet miss.
+**getleads** is first. The MCP at `https://app.getleads.io/api/mcp` accepts `GETLEADS_API_KEY` as a Bearer token. OAuth refresh tokens also work (`python scripts/getleads_auth.py`; rotating token in `public.ew_vendor_oauth_tokens`). Discovery (geography + industry + seniority + headcount) goes through the MCP tool `getleads_search`, which maps onto whatever people/lead-search tool `tools/list` actually exposes. `find_email` / `find_people` in the waterfall use the same live catalog — they return nothing (and log once) if no matching tool exists. Non-2xx and `isError` increment `tier_stats.*.errors` and never look like a quiet miss.
 
 Smartlead is the **included plan email finder** (name + domain via `POST .../find-emails`). Remaining allotment is read from `GET .../search-analytics` (`availableCredits`). When credits are spent, the cascade falls through to paid tiers. It is not used for DM people search.
 

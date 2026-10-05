@@ -80,6 +80,7 @@ class Tok:
     auth_failed_reason = None
     client_id = "cid"
     has_refresh_token = True
+    has_api_key = False
 
 
 class FakeMcp:
@@ -157,6 +158,23 @@ def test_search_people_passthrough() -> None:
     assert args["industry"] == "staffing"
     assert args["location"] == ["Utah"]
     assert args["limit"] == 25
+
+
+def test_health_snapshot_api_key_mode() -> None:
+    class KeyTok:
+        auth_failed = False
+        auth_failed_reason = None
+        client_id = ""
+        has_refresh_token = False
+        has_api_key = True
+
+    client = GetLeadsClient(token_manager=KeyTok(), mcp=FakeMcp(), tools=TOOLS)
+    assert client.enabled is True
+    snap = client.health_snapshot()
+    assert snap["configured"] is True
+    assert snap["auth_ok"] is True
+    assert snap["auth"] == "api_key"
+    assert snap["tools"] == 3
 
 
 def test_http_404_logs_warning_and_increments_errors(caplog) -> None:

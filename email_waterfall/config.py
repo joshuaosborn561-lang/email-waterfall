@@ -28,6 +28,7 @@ class Settings:
     getleads_oauth_issuer: str
     getleads_client_id: str
     getleads_refresh_token: str
+    getleads_api_key: str
     ai_ark_api_key: str
     leadmagic_api_key: str
     prospeo_api_key: str
@@ -58,6 +59,7 @@ def load_settings() -> Settings:
         ).rstrip("/"),
         getleads_client_id=_env("GETLEADS_CLIENT_ID"),
         getleads_refresh_token=_env("GETLEADS_REFRESH_TOKEN"),
+        getleads_api_key=_env("GETLEADS_API_KEY") or _env("GETLEADS_KEY"),
         ai_ark_api_key=_env("AI_ARK_API_KEY") or _env("AIARK_API_KEY"),
         leadmagic_api_key=_env("LEADMAGIC_API_KEY") or _env("LEADMAGIC_KEY"),
         prospeo_api_key=_env("PROSPEO_API_KEY"),
