@@ -60,3 +60,32 @@ def test_enrich_waterfall_has_source_and_estimate_only() -> None:
     assert "verify_only" in params
     assert params["verify_only"].default is False
     assert params["rows"].default is None
+    assert params["client_tag"].default is inspect.Parameter.empty
+
+
+def _schema_types(prop: dict) -> set[str]:
+    if "type" in prop:
+        return {prop["type"]}
+    types: set[str] = set()
+    for item in prop.get("anyOf") or prop.get("oneOf") or []:
+        if "type" in item:
+            types.add(item["type"])
+    return types
+
+
+def test_enrich_waterfall_schema_types_rows_and_source() -> None:
+    """Untyped Any properties make some MCP hosts refuse tools/call with no log."""
+    import asyncio
+    import inspect
+
+    tools = mcp.list_tools()
+    if inspect.iscoroutine(tools):
+        tools = asyncio.run(tools)
+    schema = next(t.input_schema for t in tools if t.name == "enrich_waterfall")
+    props = schema["properties"]
+    assert _schema_types(props["rows"]) >= {"array", "string", "null"}
+    assert _schema_types(props["source"]) >= {"object", "string", "null"}
+    assert _schema_types(props["source_table"]) == {"string"}
+    assert _schema_types(props["where"]) == {"string"}
+    assert _schema_types(props["target_titles"]) >= {"string"}
+    assert "client_tag" in schema.get("required", [])

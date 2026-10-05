@@ -127,6 +127,21 @@ def _parse_rows(rows: Any) -> list[dict[str, Any]]:
     return [r for r in rows if isinstance(r, dict)]
 
 
+def _has_inline_rows(rows: Any) -> bool:
+    """True when the caller passed a non-empty inline payload.
+
+    MCP hosts often fill unused optional params as null / [] / {}.
+    Those must not collide with source_table.
+    """
+    if rows is None or rows == "" or rows == [] or rows == {}:
+        return False
+    if isinstance(rows, str) and not rows.strip():
+        return False
+    if isinstance(rows, str) and rows.strip() in ("[]", "{}", "null"):
+        return False
+    return True
+
+
 def _host_from(value: str) -> str:
     raw = (value or "").strip()
     if not raw:
@@ -1470,12 +1485,13 @@ def enrich_waterfall(
     merged = table_source.coerce_source(
         source, source_table=source_table, where=where, writeback=writeback
     )
-    has_rows = rows is not None and rows != ""
+    has_rows = _has_inline_rows(rows)
     has_source = merged is not None
     if has_rows and has_source:
         raise ValueError("pass rows or source_table/source, not both")
     if not has_rows and not has_source:
-        raise ValueError("rows or source_table is required")
+        if rows is None or (isinstance(rows, str) and not rows.strip()):
+            raise ValueError("rows or source_table is required")
 
     table_src: table_source.TableSource | None = None
     if has_source:
