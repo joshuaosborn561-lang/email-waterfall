@@ -86,6 +86,51 @@ def test_source_or_rows_required() -> None:
         )
 
 
+def test_coerce_source_table_name_string() -> None:
+    assert table_source.coerce_source("client_peterson.email_resolution") == {
+        "table": "client_peterson.email_resolution"
+    }
+
+
+def test_coerce_source_and_source_table_both_table_names() -> None:
+    assert table_source.coerce_source(
+        "client_peterson.email_resolution",
+        source_table="client_peterson.email_resolution",
+        where="dl_status is null",
+    ) == {
+        "table": "client_peterson.email_resolution",
+        "where": "dl_status is null",
+    }
+
+
+def test_coerce_source_table_object() -> None:
+    assert table_source.coerce_source(
+        source_table={
+            "table": "client_peterson.email_resolution",
+            "where": "dl_status is null",
+        }
+    ) == {
+        "table": "client_peterson.email_resolution",
+        "where": "dl_status is null",
+    }
+
+
+def test_coerce_source_json_object_string() -> None:
+    assert table_source.coerce_source(
+        '{"table":"client_peterson.email_resolution","where":"wf_status is null"}'
+    ) == {
+        "table": "client_peterson.email_resolution",
+        "where": "wf_status is null",
+    }
+
+
+def test_coerce_source_null_companions() -> None:
+    assert table_source.coerce_source(
+        None, source_table="client_peterson.email_resolution", where=None
+    ) == {"table": "client_peterson.email_resolution"}
+    assert table_source.coerce_source(None, source_table=None, where=None) is None
+
+
 def test_empty_rows_do_not_block_source_table(monkeypatch) -> None:
     """MCP hosts often send rows=[] / source={} alongside source_table."""
     fetched = [
@@ -116,6 +161,30 @@ def test_parse_source_table_qualified() -> None:
     src = table_source.parse_source({"table": "client_peterson.email_resolution"})
     assert src.schema == "client_peterson"
     assert src.table == "email_resolution"
+
+
+def test_source_string_table_name_reaches_fetch(monkeypatch) -> None:
+    fetched = [
+        {
+            "_source_key": 1,
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "company_name": "Helping Hands",
+            "domain": "helpinghands.org",
+        }
+    ]
+    monkeypatch.setattr(waterfall.table_source, "fetch_source_rows", lambda src: fetched)
+    out = waterfall.enrich_waterfall(
+        client_tag="peterson",
+        need="email",
+        source="client_peterson.email_resolution",
+        source_table=None,
+        where="dl_status is null",
+        estimate_only=True,
+        write_supabase=False,
+    )
+    assert out["rows_in"] == 1
+    assert out["spend"] == 0
 
 
 def test_source_table_and_where_top_level(monkeypatch) -> None:

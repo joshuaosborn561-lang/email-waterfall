@@ -85,7 +85,49 @@ def test_enrich_waterfall_schema_types_rows_and_source() -> None:
     props = schema["properties"]
     assert _schema_types(props["rows"]) >= {"array", "string", "null"}
     assert _schema_types(props["source"]) >= {"object", "string", "null"}
-    assert _schema_types(props["source_table"]) == {"string"}
-    assert _schema_types(props["where"]) == {"string"}
+    assert _schema_types(props["source_table"]) >= {"string", "object", "null"}
+    assert _schema_types(props["where"]) >= {"string", "null"}
     assert _schema_types(props["target_titles"]) >= {"string"}
     assert "client_tag" in schema.get("required", [])
+
+
+def test_mcp_accepts_table_source_shapes() -> None:
+    """Hosts send table-name strings, objects, and null companion fields."""
+    tool = next(t for t in mcp._tool_manager.list_tools() if t.name == "enrich_waterfall")
+    validate = tool.fn_metadata.validate_arguments
+    validate(
+        {
+            "client_tag": "peterson",
+            "estimate_only": True,
+            "source_table": "client_peterson.email_resolution",
+            "where": "dl_status is null",
+            "source": None,
+        }
+    )
+    validate(
+        {
+            "client_tag": "peterson",
+            "estimate_only": True,
+            "source": "client_peterson.email_resolution",
+            "source_table": None,
+            "where": None,
+        }
+    )
+    validate(
+        {
+            "client_tag": "peterson",
+            "estimate_only": True,
+            "source_table": {
+                "table": "client_peterson.email_resolution",
+                "where": "dl_status is null",
+            },
+        }
+    )
+    validate(
+        {
+            "client_tag": "peterson",
+            "estimate_only": True,
+            "source": {"table": "client_peterson.email_resolution"},
+            "source_table": None,
+        }
+    )
