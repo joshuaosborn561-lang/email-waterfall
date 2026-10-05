@@ -391,14 +391,14 @@ def getleads_search(
     )
 )
 def enrich_waterfall(
-    rows: Any = None,
-    client_tag: str = "",
+    client_tag: str,
+    rows: list[dict[str, Any]] | str | None = None,
     need: str = "both",
     max_tier: str = "leadmagic",
-    target_titles: str = "",
+    target_titles: str | list[str] | None = None,
     require_title_match: bool = True,
     background: bool = True,
-    source: Any = None,
+    source: dict[str, Any] | str | None = None,
     source_table: str = "",
     where: str = "",
     estimate_only: bool = False,

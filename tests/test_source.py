@@ -86,6 +86,32 @@ def test_source_or_rows_required() -> None:
         )
 
 
+def test_empty_rows_do_not_block_source_table(monkeypatch) -> None:
+    """MCP hosts often send rows=[] / source={} alongside source_table."""
+    fetched = [
+        {
+            "_source_key": 1,
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "company_name": "Helping Hands",
+            "domain": "helpinghands.org",
+        }
+    ]
+    monkeypatch.setattr(waterfall.table_source, "fetch_source_rows", lambda src: fetched)
+    out = waterfall.enrich_waterfall(
+        [],
+        client_tag="peterson",
+        need="email",
+        source={},
+        source_table="client_peterson.email_resolution",
+        where="dl_status is null",
+        estimate_only=True,
+        write_supabase=False,
+    )
+    assert out["rows_in"] == 1
+    assert out["spend"] == 0
+
+
 def test_parse_source_table_qualified() -> None:
     src = table_source.parse_source({"table": "client_peterson.email_resolution"})
     assert src.schema == "client_peterson"
