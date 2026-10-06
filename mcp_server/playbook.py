@@ -105,11 +105,16 @@ any HTTP call. It is independent of `max_tier` (depth).
 | email | email finders only | any phone/mobile endpoint |
 | phone | phone finders (+ people search for LinkedIn) + Veriphone mobile check | any email finder |
 | dm | people-discovery only | phone and email finders |
-| both | email + phone + people | — |
+| people_email | people + email finders | any phone/mobile endpoint |
+| both | email + phone + people (phone is on) | — |
 
-need='email' skips AI Ark mobile-phone-finder and LeadMagic mobile-finder
-entirely — do not call and discard. Job results include `suppressed_by_need`
-counts and `estimate_only` quotes the email-only AI Ark rate (1.0, not 1.5).
+Optional `find_people` / `find_email` / `find_phone` override `need` when any
+is passed. Phone is off unless `find_phone=true` or need is `both` / `phone`.
+
+need='email' / find_phone=false skips AI Ark mobile-phone-finder, LeadMagic
+mobile-finder, Prospeo enrich_mobile, and Veriphone entirely — do not call
+and discard. Job results include `suppressed_by_need` counts and
+`estimate_only` quotes the email-only AI Ark rate (1.0, not 1.5).
 AI Ark People Search then export/single is one attempt and two vendor_calls.
 
 ## Input row shape

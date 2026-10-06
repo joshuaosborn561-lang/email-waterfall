@@ -45,9 +45,9 @@ from .need import (
     assert_capability,
     capabilities,
     credit_per_row,
-    current_need,
     estimate_suppressed,
     normalize_need,
+    resolve_need,
     set_need,
     tier_serves_need,
     using_need,
@@ -62,7 +62,7 @@ from .vendors.prospeo import ProspeoClient
 from .vendors.smartlead import SmartleadClient
 from .vendors.veriphone import VeriphoneClient, VeriphoneResult
 
-Need = Literal["email", "dm", "both", "phone"]
+Need = Literal["email", "dm", "both", "phone", "people_email"]
 MaxTier = Literal["getleads", "smartlead", "aiark", "leadmagic", "prospeo", "fullenrich"]
 
 TIER_ORDER: list[str] = [
@@ -258,10 +258,11 @@ def estimate_waterfall(
     need: str,
     client: ClientConfig,
     verify_only: bool = False,
+    caps: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Counts + per-vendor credit estimate. No enrichment vendor calls."""
     max_tier_n = normalize_max_tier(max_tier)
-    need_norm = normalize_need(need)
+    need_norm, need_caps = resolve_need(need) if caps is None else (need, caps)
     modes = classify_rows(parsed)
     if verify_only:
         mode_counts = {k: v for k, v in modes.items() if k != "skipped" and v}
@@ -277,7 +278,7 @@ def estimate_waterfall(
             "tiers_by_mode": {},
             "estimate": {},
             "need": need_norm,
-            "need_capabilities": sorted(capabilities(need_norm)),
+            "need_capabilities": sorted(need_caps),
             "suppressed_by_need": {},
             "max_tier": max_tier_n,
             "client_tag": client.tag,
@@ -309,9 +310,11 @@ def estimate_waterfall(
     for tier, count in vendor_rows.items():
         if not count and not (tier == "smartlead" and sl_snap):
             continue
-        if count and not tier_serves_need(tier, need_norm):
+        if count and not tier_serves_need(tier, need_norm, need_caps):
             continue
-        per_row = credit_per_row(tier, need_norm, CREDIT_PER_ATTEMPT.get(tier, 1.0))
+        per_row = credit_per_row(
+            tier, need_norm, CREDIT_PER_ATTEMPT.get(tier, 1.0), need_caps
+        )
         row = {
             "rows": count,
             "credits_est": round(count * per_row, 2),
@@ -341,8 +344,8 @@ def estimate_waterfall(
         "tiers_by_mode": tiers_by_mode,
         "estimate": credits,
         "need": need_norm,
-        "need_capabilities": sorted(capabilities(need_norm)),
-        "suppressed_by_need": estimate_suppressed(vendor_rows, need_norm),
+        "need_capabilities": sorted(need_caps),
+        "suppressed_by_need": estimate_suppressed(vendor_rows, need_norm, need_caps),
         "max_tier": max_tier_n,
         "client_tag": client.tag,
         "companies_table": client.companies_table,
@@ -369,6 +372,7 @@ class Waterfall:
         require_title_match: bool = True,
         need: str = "both",
         verify_only: bool = False,
+        caps: frozenset[str] | None = None,
     ):
         self.getleads = getleads or GetLeadsClient()
         self.smartlead = smartlead or SmartleadClient()
@@ -378,7 +382,12 @@ class Waterfall:
         self.fullenrich = fullenrich or FullEnrichClient()
         self.veriphone = veriphone or VeriphoneClient()
         self.max_tier = normalize_max_tier(max_tier)
-        self.need = normalize_need(need)
+        if caps is None:
+            self.need = normalize_need(need)
+            self.caps = capabilities(self.need)
+        else:
+            self.need = need
+            self.caps = caps
         self.verify_only = bool(verify_only)
         self.target_titles = list(target_titles or [])
         self.fallback_titles = fallback_titles or frozenset()
@@ -428,8 +437,7 @@ class Waterfall:
             self.suppressed_by_need[key] = self.suppressed_by_need.get(key, 0) + 1
 
     def _bind_need(self) -> None:
-        if current_need() != self.need:
-            set_need(self.need)
+        set_need(self.need, self.caps)
 
     def _allowed(self, tier: str) -> bool:
         return tier_allowed(tier, self.max_tier)
@@ -700,7 +708,7 @@ class Waterfall:
                 self._suppress(f"{tier}_phone")
 
     def _phone_only(self) -> bool:
-        return current_need() == "phone"
+        return CAP_PHONE in self.caps and CAP_EMAIL not in self.caps
 
     def _should_verify_phone(self) -> bool:
         return self.verify_only or self._phone_only()
@@ -969,7 +977,7 @@ def _enrich_one_row(
 ) -> dict[str, Any]:
     if wf.verify_only:
         return _verify_only_row(wf, row)
-    with using_need(need_norm):
+    with using_need(need_norm, getattr(wf, "caps", None)):
         email = row.get("email") or ""
         email_tier = "input" if email else ""
         person: PersonHit | None = None
@@ -1017,7 +1025,7 @@ def _enrich_one_row(
             if phone_hit:
                 phone = phone_hit.phone
                 row["phone"] = phone
-            elif need_norm == "phone":
+            elif wf._phone_only():
                 # Rejected by Veriphone: do not write the input landline.
                 phone = ""
                 row["phone"] = ""
@@ -1160,7 +1168,7 @@ def _result_payload(
         "tier_breakdown": tier_breakdown,
         "warnings": warnings,
         "need": need_norm,
-        "need_capabilities": sorted(capabilities(need_norm)),
+        "need_capabilities": sorted(getattr(wf, "caps", None) or capabilities(need_norm)),
         "suppressed_by_need": dict(getattr(wf, "suppressed_by_need", {}) or {}),
         "max_tier": max_tier_n,
         "client_tag": client.tag,
@@ -1264,7 +1272,7 @@ def _enrich_waterfall_serial(
             }
             for _, r in pending_fe
         ]
-        with using_need(need_norm):
+        with using_need(need_norm, getattr(wf, "caps", None)):
             for _, r in pending_fe:
                 wf._bump_attempt("fullenrich", r)
             hits = wf.fullenrich.find_email_bulk(fe_rows)
@@ -1463,18 +1471,27 @@ def enrich_waterfall(
     estimate_only: bool = False,
     writeback: bool | None = None,
     verify_only: bool = False,
+    find_people: bool | None = None,
+    find_email: bool | None = None,
+    find_phone: bool | None = None,
 ) -> dict[str, Any]:
     """Walk paid vendors per row; upsert isolated client tables; return counts.
 
     verify_only=True checks existing phone numbers with Veriphone and writes
     wf_phone / wf_phone_type (and contacts.line_type). Finder HTTP is skipped.
+    find_people / find_email / find_phone override need when any is passed.
     """
     client = ensure_client(
         client_tag,
         write_supabase=bool(write_supabase) and not estimate_only,
     )
     max_tier_n = normalize_max_tier(max_tier)
-    need_norm = normalize_need(need)
+    need_norm, need_caps = resolve_need(
+        need,
+        find_people=find_people,
+        find_email=find_email,
+        find_phone=find_phone,
+    )
 
     if isinstance(target_titles, list):
         titles = [str(t).strip() for t in target_titles if str(t).strip()]
@@ -1512,6 +1529,7 @@ def enrich_waterfall(
             need=need_norm,
             client=client,
             verify_only=bool(verify_only),
+            caps=need_caps,
         )
     if verify_only:
         parsed = [
@@ -1533,7 +1551,7 @@ def enrich_waterfall(
             "companies_total": 0,
             "tier_stats": {},
             "need": need_norm,
-            "need_capabilities": sorted(capabilities(need_norm)),
+            "need_capabilities": sorted(need_caps),
             "suppressed_by_need": {},
             "max_tier": max_tier_n,
             "client_tag": client.tag,
@@ -1555,6 +1573,7 @@ def enrich_waterfall(
         require_title_match=bool(require_title_match),
         need=need_norm,
         verify_only=bool(verify_only),
+        caps=need_caps,
     )
     wf.modes = classify_rows(parsed)
 
