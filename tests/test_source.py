@@ -157,6 +157,40 @@ def test_empty_rows_do_not_block_source_table(monkeypatch) -> None:
     assert out["spend"] == 0
 
 
+def test_domain_only_table_skips_missing_name_columns(monkeypatch) -> None:
+    src = table_source.parse_source({"table": "domain_only"})
+    monkeypatch.setattr(
+        table_source,
+        "list_table_columns",
+        lambda s: {"id", "company_name", "city", "state", "domain"},
+    )
+    captured: dict[str, str] = {}
+
+    def fake_rest(src, **kwargs):
+        captured["select"] = table_source._select_list(src)
+        return [
+            {
+                "id": 1,
+                "company_name": "Acme",
+                "city": "Dallas",
+                "state": "TX",
+                "domain": "acme.com",
+            }
+        ]
+
+    monkeypatch.setattr(table_source, "_fetch_page_rest", fake_rest)
+    monkeypatch.setattr(
+        table_source, "resolve_credentials", lambda pid: ("https://x.supabase.co", "k")
+    )
+    rows = table_source.fetch_source_rows(src)
+    assert "first_name" not in captured["select"].split(",")
+    assert "last_name" not in captured["select"].split(",")
+    assert "domain" in captured["select"]
+    assert "company_name" in captured["select"]
+    assert rows[0]["domain"] == "acme.com"
+    assert rows[0].get("first_name") in (None, "")
+
+
 def test_parse_source_table_qualified() -> None:
     src = table_source.parse_source({"table": "client_peterson.email_resolution"})
     assert src.schema == "client_peterson"

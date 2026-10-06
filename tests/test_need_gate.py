@@ -214,6 +214,133 @@ def test_aiark_search_then_export_is_one_attempt(monkeypatch) -> None:
     assert posts.count("/v2/people/mobile-phone-finder") == 1
 
 
+def test_need_people_email_domain_only_no_phone_calls(monkeypatch) -> None:
+    sink: dict = {}
+    gl = _vendor(
+        people=[
+            PersonHit(
+                first_name="Jane",
+                last_name="Smith",
+                title="Owner",
+                email="jane@roofco.com",
+                source_tier="getleads",
+            )
+        ],
+        email=EmailHit(email="jane@roofco.com", source_tier="getleads"),
+    )
+    ark = _vendor(enabled=True)
+    ark.find_mobile.return_value = PhoneHit(
+        phone="+12015550100", source_tier="aiark"
+    )
+    lm = _vendor(enabled=True)
+    lm.find_mobile.return_value = PhoneHit(
+        phone="+19725550199", source_tier="leadmagic"
+    )
+    _patch_clients(
+        monkeypatch,
+        gl=gl,
+        ark=ark,
+        lm=lm,
+        fe=_vendor(enabled=False),
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [{"domain": "roofco.com", "company_name": "Roof Co"}],
+        client_tag="peterson",
+        need="people_email",
+        write_supabase=True,
+    )
+    assert out["need"] == "people_email"
+    assert out["need_capabilities"] == ["email", "people"]
+    assert out["dms_found"] == 1
+    assert out["emails_found"] == 1
+    assert out["phones_found"] == 0
+    assert sink["contacts"][0].get("email") == "jane@roofco.com"
+    assert not sink["contacts"][0].get("cellphone")
+    ark.find_mobile.assert_not_called()
+    lm.find_mobile.assert_not_called()
+    for stats in out["tier_stats"].values():
+        assert stats.get("phone_hits", 0) == 0
+
+
+def test_find_flags_all_true_matches_both(monkeypatch) -> None:
+    def _run(**extra):
+        sink: dict = {}
+        ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))
+        ark.find_mobile.return_value = PhoneHit(
+            phone="+12015550100", source_tier="aiark"
+        )
+        _patch_clients(
+            monkeypatch,
+            gl=_vendor(email=None),
+            ark=ark,
+            lm=_vendor(enabled=True),
+            fe=_vendor(enabled=False),
+        )
+        _patch_writes(monkeypatch, sink)
+        out = waterfall.enrich_waterfall(
+            [
+                {
+                    "domain": "roofco.com",
+                    "first_name": "Jane",
+                    "last_name": "Smith",
+                }
+            ],
+            client_tag="peterson",
+            write_supabase=True,
+            **extra,
+        )
+        return out, ark
+
+    both, ark_both = _run(need="both")
+    flags, ark_flags = _run(
+        need="email",
+        find_people=True,
+        find_email=True,
+        find_phone=True,
+    )
+    assert flags["need"] == "both"
+    assert flags["need_capabilities"] == both["need_capabilities"]
+    assert flags["phones_found"] == both["phones_found"] == 1
+    assert flags["emails_found"] == both["emails_found"] == 1
+    assert flags["tier_stats"]["aiark"]["phone_hits"] == both["tier_stats"]["aiark"]["phone_hits"]
+    ark_both.find_mobile.assert_called()
+    ark_flags.find_mobile.assert_called()
+
+
+def test_need_both_without_flags_still_calls_phone(monkeypatch) -> None:
+    sink: dict = {}
+    ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))
+    ark.find_mobile.return_value = PhoneHit(
+        phone="+12015550100", source_tier="aiark"
+    )
+    _patch_clients(
+        monkeypatch,
+        gl=_vendor(email=None),
+        ark=ark,
+        lm=_vendor(enabled=True),
+        fe=_vendor(enabled=False),
+    )
+    _patch_writes(monkeypatch, sink)
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+            }
+        ],
+        client_tag="peterson",
+        need="both",
+        write_supabase=True,
+    )
+    assert out["need"] == "both"
+    assert out["phones_found"] == 1
+    assert out["tier_stats"]["aiark"]["phone_hits"] == 1
+    ark.find_mobile.assert_called()
+
+
 def test_need_email_attempts_not_doubled_by_skipped_phone(monkeypatch) -> None:
     ark = AiArkClient(api_key="tok")
     posts: list[str] = []

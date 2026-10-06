@@ -31,6 +31,12 @@ def _json(data: Any) -> str:
     return json.dumps(data, indent=2, default=str)
 
 
+def _tool_error(exc: BaseException) -> None:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    raise ToolError(f"{type(exc).__name__}: {exc}") from exc
+
+
 def _table_ref(source: Any, source_table: Any) -> str | None:
     if isinstance(source_table, str) and source_table.strip():
         return source_table.strip()
@@ -419,6 +425,9 @@ def enrich_waterfall(
     estimate_only: bool = False,
     writeback: bool = True,
     verify_only: bool = False,
+    find_people: bool | None = None,
+    find_email: bool | None = None,
+    find_phone: bool | None = None,
 ) -> str:
     """Resolve DMs + work emails + cellphones via paid vendors; write public.{client}_*.
 
@@ -452,14 +461,20 @@ def enrich_waterfall(
     client_tag is required (any snake_case). enrich_waterfall always calls
     ensure_client first — including builtin peterson/basco — so write tables
     exist before the first upsert. Never omit client_tag.
-    need = 'dm' | 'email' | 'both' | 'phone'. Gates vendor *calls*, not just
-    output. need='email' never hits phone/mobile endpoints (AI Ark
-    mobile-phone-finder, LeadMagic mobile-finder, Prospeo enrich_mobile).
-    need='phone' never hits email finders. On need='phone' every candidate
-    number is sent to Veriphone /v2/verify; only phone_type=mobile is written
-    as cellphone. The number and Veriphone phone_type are always written back
-    (wf_phone / wf_phone_type, contacts.line_type). Existing contact rows are
-    updated, not skipped.
+
+    Optional find_people / find_email / find_phone override `need` when any
+    of the three is passed. Phone is off unless find_phone=true or need is
+    'both' / 'phone'. If none of the flags is passed, need mapping is unchanged.
+
+    need = 'dm' | 'email' | 'both' | 'phone' | 'people_email'. Gates vendor
+    *calls*, not just output. need='people_email' finds people + emails and
+    never calls phone endpoints. need='both' includes phone. need='email'
+    never hits phone/mobile endpoints (AI Ark mobile-phone-finder, LeadMagic
+    mobile-finder, Prospeo enrich_mobile, Veriphone). need='phone' never hits
+    email finders. On need='phone' every candidate number is sent to Veriphone
+    /v2/verify; only phone_type=mobile is written as cellphone. The number and
+    Veriphone phone_type are always written back (wf_phone / wf_phone_type,
+    contacts.line_type). Existing contact rows are updated, not skipped.
     max_tier caps depth independently.
     max_tier = 'getleads' | 'smartlead' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
     (default 'leadmagic' / alias 'lm' — stops before Prospeo and FullEnrich).
@@ -469,9 +484,17 @@ def enrich_waterfall(
     from email_waterfall import waterfall as wf
     from email_waterfall.clients import ensure_client
 
-    need_norm = (need or "both").strip().lower()
-    if need_norm not in ("email", "dm", "both", "phone"):
-        raise ValueError("need must be 'email', 'dm', 'both', or 'phone'")
+    from email_waterfall.need import resolve_need
+
+    try:
+        need_norm, _caps = resolve_need(
+            need,
+            find_people=find_people,
+            find_email=find_email,
+            find_phone=find_phone,
+        )
+    except Exception as exc:
+        _tool_error(exc)
     client = ensure_client(client_tag, write_supabase=not estimate_only)
     max_tier_n = wf.normalize_max_tier(max_tier)
 
@@ -481,7 +504,7 @@ def enrich_waterfall(
         return wf.enrich_waterfall(
             rows,
             client_tag=client.tag,
-            need=need_norm,  # type: ignore[arg-type]
+            need=need,  # type: ignore[arg-type]
             max_tier=max_tier_n,
             target_titles=target_titles,
             require_title_match=bool(require_title_match),
@@ -493,6 +516,9 @@ def enrich_waterfall(
             estimate_only=bool(estimate_only),
             writeback=bool(writeback) and not estimate_only,
             verify_only=bool(verify_only),
+            find_people=find_people,
+            find_email=find_email,
+            find_phone=find_phone,
         )
 
     def _run(job: Any) -> dict[str, Any]:
@@ -501,10 +527,18 @@ def enrich_waterfall(
         def on_progress(snapshot: dict[str, Any]) -> None:
             update_job_progress(job.id, snapshot)
 
-        return _run_enrich(progress_callback=on_progress)
+        return _run_enrich_or_raise(progress_callback=on_progress)
+
+    def _run_enrich_or_raise(
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return _run_enrich(progress_callback)
+        except Exception as exc:
+            _tool_error(exc)
 
     if estimate_only:
-        return _json(_run_enrich())
+        return _json(_run_enrich_or_raise())
     if source not in (None, "", {}, []) or source_table not in (None, "", {}, []):
         rows_chars = 50_000
     else:
@@ -521,6 +555,9 @@ def enrich_waterfall(
                 "need": need_norm,
                 "max_tier": max_tier_n,
                 "verify_only": bool(verify_only),
+                "find_people": find_people,
+                "find_email": find_email,
+                "find_phone": find_phone,
                 "client_tag": client.tag,
                 "rows_chars": rows_chars,
                 "source_table": _table_ref(source, source_table),
@@ -536,7 +573,7 @@ def enrich_waterfall(
                 "contacts_table": client.contacts_table,
             }
         )
-    return _json(_run_enrich())
+    return _json(_run_enrich_or_raise())
 
 
 def _mount_http_routes() -> None:

@@ -259,22 +259,24 @@ def list_table_columns(src: TableSource) -> set[str] | None:
 
 
 def discover_column_map(src: TableSource) -> None:
-    """Fill optional aliases (owner_title, candidate_email, domain) when map omitted."""
-    if src.map_explicit:
-        return
+    """Fill aliases that exist; drop name columns the table does not have."""
     cols = list_table_columns(src)
     if not cols:
         return
     mapping = dict(src.column_map)
+    if src.map_explicit:
+        src.column_map = {k: v for k, v in mapping.items() if v in cols}
+        return
     for field_name, candidates in FIELD_CANDIDATES.items():
         current = mapping.get(field_name)
         if current and current in cols:
             continue
-        for cand in candidates:
-            if cand in cols:
-                mapping[field_name] = cand
-                break
-    src.column_map = mapping
+        found = next((cand for cand in candidates if cand in cols), None)
+        if found:
+            mapping[field_name] = found
+        elif current and current not in cols:
+            mapping.pop(field_name, None)
+    src.column_map = {k: v for k, v in mapping.items() if v in cols}
 
 
 def resolve_credentials(project_id: str) -> tuple[str, str]:

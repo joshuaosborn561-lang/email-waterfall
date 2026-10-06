@@ -61,6 +61,10 @@ def test_enrich_waterfall_has_source_and_estimate_only() -> None:
     assert params["verify_only"].default is False
     assert params["rows"].default is None
     assert params["client_tag"].default is inspect.Parameter.empty
+    assert "find_people" in params
+    assert "find_email" in params
+    assert "find_phone" in params
+    assert params["find_phone"].default is None
 
 
 def _schema_types(prop: dict) -> set[str]:
@@ -131,3 +135,17 @@ def test_mcp_accepts_table_source_shapes() -> None:
             "source_table": None,
         }
     )
+
+
+def test_mcp_enrich_error_includes_exception_message() -> None:
+    import pytest
+    from mcp.server.mcpserver.exceptions import ToolError
+    from mcp_server.server import enrich_waterfall
+
+    with pytest.raises(ToolError, match="need must be"):
+        enrich_waterfall(
+            client_tag="peterson",
+            need="not-a-need",
+            estimate_only=True,
+            rows=[{"domain": "x.com"}],
+        )

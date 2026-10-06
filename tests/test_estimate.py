@@ -143,6 +143,37 @@ def test_estimate_only_both_quotes_aiark_email_plus_phone(monkeypatch) -> None:
     assert out["suppressed_by_need"] == {}
 
 
+def test_estimate_only_find_phone_false_excludes_phone_credits(monkeypatch) -> None:
+    _mute_smartlead(monkeypatch)
+    out = waterfall.enrich_waterfall(
+        [
+            {
+                "domain": "roofco.com",
+                "first_name": "Jane",
+                "last_name": "Smith",
+                "company_name": "Roof Co",
+            }
+        ],
+        client_tag="peterson",
+        need="both",
+        find_people=True,
+        find_email=True,
+        find_phone=False,
+        max_tier="leadmagic",
+        estimate_only=True,
+        write_supabase=False,
+    )
+    assert out["need"] == "people_email"
+    assert out["need_capabilities"] == ["email", "people"]
+    assert out["estimate"]["aiark"]["credits_per_row"] == 1.0
+    assert out["estimate"]["aiark"]["credits_est"] == 1.0
+    assert out["estimate"]["aiark"]["rate_note"] == "email-only"
+    assert "aiark_phone" in out["suppressed_by_need"]
+    assert "leadmagic_phone" in out["suppressed_by_need"]
+    assert "prospeo_phone" in out["suppressed_by_need"]
+    assert "veriphone_phone" in out["suppressed_by_need"]
+
+
 def test_estimate_only_domain_rows_include_early_tiers(monkeypatch) -> None:
     _mute_smartlead(monkeypatch)
     out = waterfall.enrich_waterfall(
