@@ -1,1 +1,1 @@
-see next
+"""DM / work-email enrichment waterfall.\n\nTiers (fixed, no Maps, no website crawl, no Apify):\n  getleads → Smartlead (plan email finder) → AI Ark → LeadMagic → Prospeo → FullEnrich\n"""\n
