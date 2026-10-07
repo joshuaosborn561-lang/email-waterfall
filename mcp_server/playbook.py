@@ -35,6 +35,10 @@ Never omit `client_tag`. Never write to a shared contacts table.
 5. Report counts / cost only. Do not dump contact payloads.
 6. To *find* new leads (not enrich a table you already have), use
    `getleads_search` with the live `filter_schema` field names.
+7. For one Slack-card prospect (ReplyHandler), call `enrich_person` or
+   `POST /enrich-one`. That returns the compact hit. Default
+   `write_supabase=false`, `need=both`, `max_tier=fullenrich`. FullEnrich
+   finds cellphones via `contact.phones`.
 
 ## Table source
 Maps-scraper style params, mutually exclusive with `rows`:
@@ -95,8 +99,9 @@ AI Ark is fully used on all three lanes (not people-only):
   `POST /v2/people/export/single`
 - cellphone: LinkedIn URL or name+domain → `POST /v2/people/mobile-phone-finder`
 
-Cellphones also fall through to LeadMagic mobile-finder (and Prospeo if
-max_tier allows). Input `phone` / `cellphone` / `mobile` is written as cellphone
+Cellphones also fall through to LeadMagic mobile-finder, then Prospeo, then
+FullEnrich `contact.phones` if max_tier allows. Input `phone` / `cellphone` /
+`mobile` is written as cellphone
 except on need='phone': those runs also call Veriphone `GET /v2/verify` and
 keep the number only when `phone_type` is `mobile`.
 
@@ -115,8 +120,8 @@ Optional `find_people` / `find_email` / `find_phone` override `need` when any
 is passed. Phone is off unless `find_phone=true` or need is `both` / `phone`.
 
 need='email' / find_phone=false skips AI Ark mobile-phone-finder, LeadMagic
-mobile-finder, Prospeo enrich_mobile, and Veriphone entirely — do not call
-and discard. Job results include `suppressed_by_need` counts and
+mobile-finder, Prospeo enrich_mobile, FullEnrich contact.phones, and Veriphone
+entirely — do not call and discard. Job results include `suppressed_by_need` counts and
 `estimate_only` quotes the email-only AI Ark rate (1.0, not 1.5).
 AI Ark People Search then export/single is one attempt and two vendor_calls.
 

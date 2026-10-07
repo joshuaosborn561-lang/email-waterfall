@@ -15,6 +15,7 @@ def test_tool_names() -> None:
     names = sorted(t.name for t in tools)
     assert "getleads_search" in names
     assert "enrich_waterfall" in names
+    assert "enrich_person" in names
     assert "health" in names
     assert "get_job_status" in names
     assert "describe_client" in names
