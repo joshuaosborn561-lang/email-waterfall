@@ -43,7 +43,7 @@ def test_name_company_not_rejected(monkeypatch) -> None:
     assert out["rows_in"] == 1
     assert out["modes"]["name_company"] == 1
     assert out["emails_found"] == 1
-    gl.find_email.assert_not_called()
+    gl.find_email.assert_called()
     sl.find_email.assert_not_called()
     ark.find_email.assert_called()
     lm.find_email.assert_called()

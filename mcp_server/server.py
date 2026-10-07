@@ -511,8 +511,9 @@ def enrich_waterfall(
     `rows` = JSON list of {domain?, company_name?, first_name?, last_name?, title?,
     email?, linkedin_url?, phone?, cellphone?, mobile?, place_id?, city?, state?}.
     Domain OR (first_name + last_name + company_name) is required. Name+company
-    rows skip getleads/Smartlead and enter at AI Ark → LeadMagic → Prospeo →
-    FullEnrich. company_name is passed to FullEnrich verbatim.
+    rows use GetLeads enrich_person_batch, skip Smartlead, then AI Ark →
+    LeadMagic → Prospeo → FullEnrich. company_name is passed to FullEnrich
+    verbatim.
 
     `source` = optional richer object {project_id, schema?, table, where?,
     key_column?, map?, limit?, cursor?}. Mutually exclusive with rows.

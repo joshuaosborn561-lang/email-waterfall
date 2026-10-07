@@ -49,12 +49,13 @@ def test_estimate_only_name_company_no_spend(monkeypatch) -> None:
     assert out["modes"]["name_company"] == 956
     assert "domain" not in out["modes"]
     assert out["tiers_by_mode"]["name_company"] == [
+        "getleads",
         "aiark",
         "leadmagic",
         "prospeo",
         "fullenrich",
     ]
-    assert "getleads" not in out["estimate"]
+    assert out["estimate"]["getleads"]["rows"] == 956
     assert "smartlead" not in out["estimate"]
     assert out["estimate"]["aiark"]["rows"] == 956
     assert out["estimate"]["aiark"]["credits_per_row"] == 1.0

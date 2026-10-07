@@ -6,9 +6,12 @@ import logging
 
 from email_waterfall.vendors.getleads import (
     GetLeadsClient,
+    PERSON_ENRICH_TOOL,
     arguments_valid,
+    items_ready,
     map_arguments,
     pick_satisfiable_tool,
+    route_email_lookup,
     score_email_tool,
 )
 from email_waterfall.vendors.mcp_http import McpError
@@ -151,19 +154,39 @@ class FakeMcp:
 
     def call_tool(self, name, arguments):
         self.calls.append((name, arguments))
-        if name == "getleads_get_emails_from_linkedin_batch":
+        if name in (
+            "getleads_get_emails_from_linkedin_batch",
+            "getleads_enrich_person_batch",
+        ):
             items = arguments.get("items")
             if not isinstance(items, list):
                 raise McpError(
-                    'Invalid arguments for tool getleads_get_emails_from_linkedin_batch: '
+                    f'Invalid arguments for tool {name}: '
                     'expected array at "items", received undefined',
                     status=-32602,
+                    body='{"error":{"code":-32602,"message":"items expected array, received undefined"}}',
                 )
-            if not items or not all(
+            if not items:
+                raise McpError(
+                    f"Invalid arguments for tool {name}: items must be a non-empty array",
+                    status=-32602,
+                    body='{"error":{"code":-32602,"message":"items expected array"}}',
+                )
+            if name == "getleads_get_emails_from_linkedin_batch" and not all(
                 isinstance(row, dict) and row.get("linkedin_url") for row in items
             ):
                 raise McpError(
                     "Invalid arguments for tool getleads_get_emails_from_linkedin_batch",
+                    status=-32602,
+                )
+            if name == "getleads_enrich_person_batch" and not all(
+                isinstance(row, dict)
+                and row.get("first_name")
+                and row.get("last_name")
+                for row in items
+            ):
+                raise McpError(
+                    "Invalid arguments for tool getleads_enrich_person_batch",
                     status=-32602,
                 )
         if self.error is not None:
@@ -183,11 +206,17 @@ def test_find_email_maps_real_tool_shape() -> None:
     assert hit.email == "jane@acme.test"
     assert hit.phone == "+15551212000"
     assert hit.source_tier == "getleads"
-    assert mcp.calls[0][0] == "find_work_email"
+    assert mcp.calls[0][0] == PERSON_ENRICH_TOOL
     args = mcp.calls[0][1]
-    assert args["firstName"] == "Jane"
-    assert args["lastName"] == "Doe"
-    assert args["companyDomain"] == "acme.test"
+    assert args["items"] == [
+        {
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "email_domain": "acme.test",
+            "company_name": "Acme",
+        }
+    ]
+    assert client.credits_charged == 1
 
 
 def test_find_people_maps_real_tool_shape() -> None:
@@ -381,7 +410,8 @@ def test_find_email_linkedin_batch_sends_items() -> None:
     assert hit.email == "jane@acme.test"
     assert mcp.calls[0][0] == "getleads_get_emails_from_linkedin_batch"
     assert mcp.calls[0][1] == {
-        "items": [{"linkedin_url": "https://www.linkedin.com/in/jane-doe"}]
+        "items": [{"linkedin_url": "https://www.linkedin.com/in/jane-doe"}],
+        "limit_per_item": 1,
     }
     assert client.calls == 1
     assert client.errors == 0
@@ -393,9 +423,9 @@ def test_find_email_skips_linkedin_batch_without_url() -> None:
         token_manager=Tok(), mcp=mcp, tools=[LINKEDIN_BATCH_TOOL]
     )
     hit = client.find_email("Jane", "Doe", "acme.test", "Acme")
-    assert hit is None
-    assert mcp.calls == []
-    assert client.calls == 0
+    assert hit is not None
+    assert mcp.calls[0][0] == PERSON_ENRICH_TOOL
+    assert client.calls == 1
     assert client.errors == 0
 
 
@@ -423,3 +453,97 @@ def test_pick_satisfiable_prefers_linkedin_when_url_present() -> None:
     )
     assert tool is not None
     assert tool["name"] == "getleads_get_emails_from_linkedin_batch"
+
+
+def test_route_linkedin_vs_person_vs_skip() -> None:
+    tool, payload = route_email_lookup(
+        linkedin_url="https://www.linkedin.com/in/jane-doe",
+        first_name="Jane",
+        last_name="Doe",
+        domain="acme.test",
+    )
+    assert tool == "getleads_get_emails_from_linkedin_batch"
+    assert items_ready(payload)
+    assert payload["items"] == [{"linkedin_url": "https://www.linkedin.com/in/jane-doe"}]
+    assert payload["limit_per_item"] == 1
+
+    tool, payload = route_email_lookup(
+        first_name="Jane", last_name="Doe", company_name="Acme"
+    )
+    assert tool == PERSON_ENRICH_TOOL
+    assert payload["items"][0]["company_name"] == "Acme"
+    assert "email_domain" not in payload["items"][0]
+
+    tool, payload = route_email_lookup(first_name="Jane", last_name="Doe")
+    assert tool is None
+    assert payload is None
+    assert not items_ready(payload)
+    assert not items_ready({})
+    assert not items_ready({"items": None})
+
+
+def test_find_email_skips_when_neither_linkedin_nor_name() -> None:
+    mcp = FakeMcp(result=ANON_EMAIL, tools=[LINKEDIN_BATCH_TOOL, PERSON_BATCH_TOOL])
+    client = GetLeadsClient(
+        token_manager=Tok(),
+        mcp=mcp,
+        tools=[LINKEDIN_BATCH_TOOL, PERSON_BATCH_TOOL],
+    )
+    hit = client.find_email("", "", "", "")
+    assert hit is None
+    assert mcp.calls == []
+    assert client.calls == 0
+    assert client.errors == 0
+
+
+def test_find_email_name_company_without_domain() -> None:
+    mcp = FakeMcp(result=ANON_EMAIL, tools=[LINKEDIN_BATCH_TOOL, PERSON_BATCH_TOOL])
+    client = GetLeadsClient(
+        token_manager=Tok(),
+        mcp=mcp,
+        tools=[LINKEDIN_BATCH_TOOL, PERSON_BATCH_TOOL],
+    )
+    hit = client.find_email("Jane", "Doe", "", "Helping Hands Inc")
+    assert hit is not None
+    assert mcp.calls[0][0] == PERSON_ENRICH_TOOL
+    assert mcp.calls[0][1]["items"] == [
+        {
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "company_name": "Helping Hands Inc",
+        }
+    ]
+    assert client.credits_charged == 1
+
+
+def test_find_email_bulk_person_batches_50() -> None:
+    rows = [
+        {"first_name": f"A{i}", "last_name": "Bee", "domain": "acme.test"}
+        for i in range(51)
+    ]
+    mcp = FakeMcp(
+        result={"results": [ANON_EMAIL]},
+        tools=[PERSON_BATCH_TOOL],
+    )
+    client = GetLeadsClient(token_manager=Tok(), mcp=mcp, tools=[PERSON_BATCH_TOOL])
+    hits = client.find_email_bulk(rows)
+    assert len(mcp.calls) == 2
+    assert mcp.calls[0][0] == PERSON_ENRICH_TOOL
+    assert len(mcp.calls[0][1]["items"]) == 50
+    assert len(mcp.calls[1][1]["items"]) == 1
+    assert all(isinstance(mcp.calls[0][1]["items"], list) for _ in (0,))
+    assert hits[0] is not None
+    assert client.calls == 2
+
+
+def test_invoke_never_sends_undefined_items() -> None:
+    mcp = FakeMcp(result=ANON_EMAIL, tools=[LINKEDIN_BATCH_TOOL])
+    client = GetLeadsClient(
+        token_manager=Tok(), mcp=mcp, tools=[LINKEDIN_BATCH_TOOL]
+    )
+    assert client._invoke_tool(LINKEDIN_BATCH_TOOL["name"], {}) is None
+    assert client._invoke_tool(LINKEDIN_BATCH_TOOL["name"], {"items": None}) is None
+    assert client._invoke_tool(LINKEDIN_BATCH_TOOL["name"], {"items": []}) is None
+    assert mcp.calls == []
+    assert client.calls == 0
+    assert client.errors == 0

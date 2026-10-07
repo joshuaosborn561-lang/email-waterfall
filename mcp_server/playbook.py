@@ -61,10 +61,10 @@ already have without paying AI Ark / LeadMagic again.
 
 ## Name + company (no domain)
 Rows with first_name + last_name + company_name and no domain are tagged
-`mode=name_company`. They skip getleads and Smartlead and enter at AI Ark →
-LeadMagic → Prospeo → FullEnrich. `company_name` is sent to FullEnrich
-verbatim. When a tier returns an email, its domain is written back for later
-tiers.
+`mode=name_company`. GetLeads uses `getleads_enrich_person_batch` (no LinkedIn
+tool). Smartlead is skipped (needs a domain). Then AI Ark → LeadMagic →
+Prospeo → FullEnrich. `company_name` is sent to FullEnrich verbatim. When a
+tier returns an email, its domain is written back for later tiers.
 
 ## Tiers
 getleads (OAuth MCP) → Smartlead (included plan email finder) → AI Ark →
@@ -77,7 +77,10 @@ getleads is first. `GETLEADS_API_KEY` is a Bearer on the GetLeads MCP
 (`python scripts/getleads_auth.py`). Discovery of new leads (geo + industry +
 seniority + headcount) is `getleads_search`. Enrichment still walks the
 waterfall. Vendor HTTP errors increment `errors` and, at ≥50% of calls
-(n≥10), appear in job `warnings`.
+(n≥10), appear in job `warnings`. The first error body is copied onto
+`tier_stats.*.first_error`. More than 20 errors in a tier's first 25 calls
+disables that tier for the rest of the job. GetLeads `credits_charged` is 1
+per successful enrich row.
 
 Smartlead uses the monthly finder allotment on the Smartlead plan. Credits are
 checked via search-analytics; once they are spent the cascade falls through to

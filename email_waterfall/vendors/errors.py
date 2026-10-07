@@ -44,8 +44,18 @@ def log_vendor_failure(
     )
 
 
-def bump_errors(client: Any) -> int:
+def remember_first_error(client: Any, *, body: str = "", error: str = "") -> None:
+    """Keep the first vendor error body for get_job_status / tier_stats."""
+    if getattr(client, "first_error", None):
+        return
+    preview = (body or error or "").strip()
+    if preview:
+        client.first_error = preview[:300]
+
+
+def bump_errors(client: Any, *, body: str = "", error: str = "") -> int:
     client.errors = int(getattr(client, "errors", 0) or 0) + 1
+    remember_first_error(client, body=body, error=error)
     return client.errors
 
 
@@ -56,11 +66,12 @@ def record_response_failure(
     *,
     error: str = "",
 ) -> None:
-    bump_errors(client)
+    preview = body_preview(response)
+    bump_errors(client, body=preview, error=error)
     log_vendor_failure(
         getattr(client, "tier", "unknown"),
         url,
         status=None if response is None else response.status_code,
-        body=body_preview(response),
+        body=preview,
         error=error or ("transport" if response is None else ""),
     )
