@@ -1,4 +1,9 @@
-"""FullEnrich — last-tier email only. 1 credit per work email found, 0 on miss."""
+"""FullEnrich — last-tier email and cellphone.
+
+Same bulk API for both: POST /contact/enrich/bulk with enrich_fields
+`contact.work_emails` and/or `contact.phones`. 1 credit per work email or
+mobile found, 0 on miss.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +12,9 @@ from typing import Any
 
 from email_waterfall import http_client
 from email_waterfall.config import settings
-from email_waterfall.need import CAP_EMAIL, assert_capability
+from email_waterfall.need import CAP_EMAIL, CAP_PHONE, assert_capability, current_capabilities
 
-from .base import EmailHit
+from .base import EmailHit, PhoneHit
 from .errors import record_response_failure
 
 
@@ -43,6 +48,7 @@ class FullEnrichClient:
         domain: str,
         company_name: str = "",
         *,
+        linkedin_url: str = "",
         poll_seconds: float = 2.0,
         max_wait: float = 90.0,
     ) -> EmailHit | None:
@@ -53,6 +59,34 @@ class FullEnrichClient:
                     "last_name": last_name,
                     "domain": domain,
                     "company_name": company_name,
+                    "linkedin_url": linkedin_url,
+                }
+            ],
+            poll_seconds=poll_seconds,
+            max_wait=max_wait,
+        )
+        return results[0] if results else None
+
+    def find_mobile(
+        self,
+        first_name: str = "",
+        last_name: str = "",
+        domain: str = "",
+        company_name: str = "",
+        *,
+        linkedin_url: str = "",
+        poll_seconds: float = 2.0,
+        max_wait: float = 90.0,
+    ) -> PhoneHit | None:
+        """Cellphone via enrich/bulk with contact.phones (after Prospeo)."""
+        results = self.find_mobile_bulk(
+            [
+                {
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "domain": domain,
+                    "company_name": company_name,
+                    "linkedin_url": linkedin_url,
                 }
             ],
             poll_seconds=poll_seconds,
@@ -74,29 +108,116 @@ class FullEnrichClient:
         assert_capability(
             CAP_EMAIL, vendor=self.tier, endpoint="POST /contact/enrich/bulk"
         )
+        fields = ["contact.work_emails"]
+        if CAP_PHONE in current_capabilities():
+            fields.append("contact.phones")
+        finished, index_map = self._submit_bulk(
+            rows,
+            fields=fields,
+            name=name,
+            poll_seconds=poll_seconds,
+            max_wait=max_wait,
+        )
+        by_idx: dict[int, EmailHit] = {}
+        for contact, orig_idx in self._contacts_with_idx(finished, index_map):
+            email = _work_email_from_contact(contact)
+            if not email:
+                continue
+            hit = EmailHit(
+                email=email,
+                source_tier=self.tier,
+                status=_email_status(contact),
+                phone=_phone_from_contact(contact),
+                raw=contact if isinstance(contact, dict) else {},
+            )
+            self.hits += 1
+            self.credits_used += 1
+            if orig_idx >= 0:
+                by_idx[orig_idx] = hit
+        return [by_idx.get(i) for i in range(len(rows))]
+
+    def find_mobile_bulk(
+        self,
+        rows: list[dict[str, str]],
+        *,
+        name: str = "email-waterfall phone",
+        poll_seconds: float = 3.0,
+        max_wait: float = 180.0,
+    ) -> list[PhoneHit | None]:
+        if not self.enabled or not rows:
+            return [None] * len(rows)
+
+        assert_capability(
+            CAP_PHONE, vendor=self.tier, endpoint="POST /contact/enrich/bulk phones"
+        )
+        finished, index_map = self._submit_bulk(
+            rows,
+            fields=["contact.phones"],
+            name=name,
+            poll_seconds=poll_seconds,
+            max_wait=max_wait,
+        )
+        by_idx: dict[int, PhoneHit] = {}
+        for contact, orig_idx in self._contacts_with_idx(finished, index_map):
+            phone = _phone_from_contact(contact)
+            if not phone:
+                continue
+            hit = PhoneHit(
+                phone=phone,
+                source_tier=self.tier,
+                raw=contact if isinstance(contact, dict) else {},
+            )
+            self.hits += 1
+            self.credits_used += 1
+            if orig_idx >= 0:
+                by_idx[orig_idx] = hit
+        return [by_idx.get(i) for i in range(len(rows))]
+
+    def _row_payload(
+        self, row: dict[str, str], idx: int, fields: list[str]
+    ) -> dict[str, Any] | None:
+        first = (row.get("first_name") or "").strip()
+        last = (row.get("last_name") or "").strip()
+        domain = (row.get("domain") or "").strip()
+        company = (row.get("company_name") or "").strip()
+        linkedin = (row.get("linkedin_url") or "").strip()
+        if not first or not last:
+            return None
+        if not domain and not company and not linkedin:
+            return None
+        payload: dict[str, Any] = {
+            "first_name": first,
+            "last_name": last,
+            "enrich_fields": list(fields),
+            "custom": {"idx": str(idx)},
+        }
+        if company:
+            payload["company_name"] = company
+        if domain:
+            payload["domain"] = domain
+        if linkedin:
+            payload["linkedin_url"] = linkedin
+        return payload
+
+    def _submit_bulk(
+        self,
+        rows: list[dict[str, str]],
+        *,
+        fields: list[str],
+        name: str,
+        poll_seconds: float,
+        max_wait: float,
+    ) -> tuple[list[dict[str, Any]], dict[int, int]]:
         data = []
+        index_map: dict[int, int] = {}
         for i, row in enumerate(rows[:100]):
-            first = (row.get("first_name") or "").strip()
-            last = (row.get("last_name") or "").strip()
-            domain = (row.get("domain") or "").strip()
-            company = (row.get("company_name") or "").strip()
-            if not first or not last:
+            payload = self._row_payload(row, i, fields)
+            if not payload:
                 continue
-            if not domain and not company:
-                continue
-            payload: dict[str, Any] = {
-                "first_name": first,
-                "last_name": last,
-                "enrich_fields": ["contact.work_emails"],
-                "custom": {"idx": str(i)},
-            }
-            if company:
-                payload["company_name"] = company
-            if domain:
-                payload["domain"] = domain
+            index_map[i] = i
             data.append(payload)
         if not data:
-            return [None] * len(rows)
+            return [], {}
 
         self.calls += 1
         url = f"{self.base_url}/contact/enrich/bulk"
@@ -109,15 +230,15 @@ class FullEnrichClient:
         )
         if r is None:
             record_response_failure(self, url, None)
-            return [None] * len(rows)
+            return [], {}
         try:
             if r.status_code >= 400:
                 record_response_failure(self, url, r)
-                return [None] * len(rows)
+                return [], {}
             accepted = r.json()
         except ValueError:
             record_response_failure(self, url, r, error="non-json")
-            return [None] * len(rows)
+            return [], {}
 
         enrichment_id = (
             accepted.get("enrichment_id")
@@ -125,33 +246,26 @@ class FullEnrichClient:
             or (accepted.get("data") or {}).get("enrichment_id")
         )
         if not enrichment_id:
-            return [None] * len(rows)
-
+            return [], {}
         finished = self._poll(
             str(enrichment_id), poll_seconds=poll_seconds, max_wait=max_wait
         )
-        by_idx: dict[int, EmailHit] = {}
+        return finished, index_map
+
+    def _contacts_with_idx(
+        self,
+        finished: list[dict[str, Any]],
+        index_map: dict[int, int],
+    ) -> list[tuple[dict[str, Any], int]]:
+        out: list[tuple[dict[str, Any], int]] = []
         for contact in finished:
-            email = _work_email_from_contact(contact)
-            if not email:
-                continue
             custom = contact.get("custom") or {}
             try:
                 idx = int(custom.get("idx", -1))
             except (TypeError, ValueError):
                 idx = -1
-            hit = EmailHit(
-                email=email,
-                source_tier=self.tier,
-                status=_email_status(contact),
-                raw=contact if isinstance(contact, dict) else {},
-            )
-            self.hits += 1
-            self.credits_used += 1
-            if idx >= 0:
-                by_idx[idx] = hit
-
-        return [by_idx.get(i) for i in range(len(rows))]
+            out.append((contact, index_map.get(idx, idx)))
+        return out
 
     def _poll(
         self, enrichment_id: str, *, poll_seconds: float, max_wait: float
@@ -201,6 +315,9 @@ def _work_email_from_contact(contact: dict[str, Any]) -> str:
     emails = []
     if isinstance(info, dict):
         emails = info.get("work_emails") or info.get("emails") or []
+        most_obj = info.get("most_probable_work_email")
+        if isinstance(most_obj, dict) and most_obj.get("email"):
+            return str(most_obj["email"]).strip().lower()
     if not emails and contact.get("email"):
         return str(contact.get("email")).strip().lower()
     for item in emails:
@@ -214,6 +331,36 @@ def _work_email_from_contact(contact: dict[str, Any]) -> str:
     if most:
         return str(most).strip().lower()
     return ""
+
+
+def _phone_from_contact(contact: dict[str, Any]) -> str:
+    info = contact.get("contact_info") or contact.get("contact") or contact
+    if not isinstance(info, dict):
+        info = contact if isinstance(contact, dict) else {}
+    most = info.get("most_probable_phone")
+    picked = _phone_value(most)
+    if picked:
+        return picked
+    for item in info.get("phones") or contact.get("phones") or []:
+        picked = _phone_value(item)
+        if picked:
+            return picked
+    return ""
+
+
+def _phone_value(item: Any) -> str:
+    if isinstance(item, str):
+        raw = item.strip()
+        digits = "".join(c for c in raw if c.isdigit())
+        return raw if len(digits) >= 7 else ""
+    if not isinstance(item, dict):
+        return ""
+    line = str(item.get("line_type") or "").upper()
+    if line == "LANDLINE":
+        return ""
+    raw = str(item.get("number") or item.get("phone") or "").strip()
+    digits = "".join(c for c in raw if c.isdigit())
+    return raw if len(digits) >= 7 else ""
 
 
 def _email_status(contact: dict[str, Any]) -> str:
