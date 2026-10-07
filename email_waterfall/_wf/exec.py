@@ -173,7 +173,7 @@ def _enrich_waterfall_parallel(
     client: ClientConfig,
     need_norm: str,
     max_tier_n: str,
-    titles=titles,
+    titles: list[str],
     require_title_match: bool,
     write_supabase: bool,
     wf: Waterfall,
