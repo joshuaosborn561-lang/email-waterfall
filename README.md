@@ -36,7 +36,7 @@ AI Ark is next on **people, email, and cellphone** (not people-only):
 - Email: LinkedIn URL, AI Ark person id, name + domain, and/or phone → `POST /v2/people/export/single`
 - Cellphone: LinkedIn URL or name + domain → `POST /v2/people/mobile-phone-finder` (5 credits on hit)
 
-LeadMagic mobile-finder runs after AI Ark when a LinkedIn URL or work email is available. Prospeo `enrich_mobile` only runs if `max_tier` is raised to `prospeo` or `fullenrich`.
+LeadMagic mobile-finder runs after AI Ark when a LinkedIn URL or work email is available. Prospeo `enrich_mobile` only runs if `max_tier` is raised to `prospeo` or `fullenrich`. FullEnrich is last-tier **email and cellphone** (`contact.work_emails` and `contact.phones`; skip `LANDLINE`).
 
 On `need='phone'` only, every candidate number (input or vendor) is checked with Veriphone `GET /v2/verify`. A number is written as cellphone only when `phone_valid` is true and `phone_type` is `mobile`. Landline / voip / invalid are dropped and the next finder is tried. The number and Veriphone `phone_type` are written back to the source table as `wf_phone` / `wf_phone_type` and to `{client}_*contacts.line_type`. Existing contact rows are **updated** on `(domain, email)`, not skipped. Set `VERIPHONE_API_KEY`. `need='both'` and `need='email'` skip Veriphone unless `verify_only=true`.
 
@@ -115,7 +115,21 @@ Smartlead 429 / rate-limit backs off and retries. It does not set `credits_exhau
 
 Inline `rows` still works as before (domain and/or name+company). Response is **counts / job_id / cost only** — never row payloads. Long HTTP runs return `job_id` — poll `get_job_status`.
 
-Other tools: `health`, `ensure_client`, `list_clients`, `describe_client`, `get_job_status`, `list_background_jobs`, `getleads_search`.
+Other tools: `health`, `ensure_client`, `list_clients`, `describe_client`, `get_job_status`, `list_background_jobs`, `getleads_search`, `enrich_person`.
+
+## MCP tool: `enrich_person` / `POST /enrich-one`
+
+One-person lookup for ReplyHandler Slack cards. Walks the same waterfall and returns **that compact hit** (`email`, `phone`, `linkedin_url`, `website`, source tiers) — not a bulk payload dump.
+
+Defaults: `need=both`, `max_tier=fullenrich`, `write_supabase=false` (a Slack-card lookup must not create `{tag}_wf_*` rows). `client_tag` is still required (`replyhandler` is fine).
+
+```bash
+curl -sS -X POST https://<railway-host>/enrich-one \
+  -H 'content-type: application/json' \
+  -d '{"client_tag":"replyhandler","email":"jane@roofco.com","full_name":"Jane Smith","need":"both","max_tier":"fullenrich"}'
+```
+
+`enrich_waterfall` still returns counts / job_id only. Do not use it for Slack cards.
 
 ## Supabase writes
 

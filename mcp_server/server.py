@@ -541,7 +541,8 @@ def enrich_waterfall(
     *calls*, not just output. need='people_email' finds people + emails and
     never calls phone endpoints. need='both' includes phone. need='email'
     never hits phone/mobile endpoints (AI Ark mobile-phone-finder, LeadMagic
-    mobile-finder, Prospeo enrich_mobile, Veriphone). need='phone' never hits
+    mobile-finder, Prospeo enrich_mobile, FullEnrich contact.phones, Veriphone).
+    need='phone' never hits
     email finders. On need='phone' every candidate number is sent to Veriphone
     /v2/verify; only phone_type=mobile is written as cellphone. The number and
     Veriphone phone_type are always written back (wf_phone / wf_phone_type,
@@ -647,6 +648,59 @@ def enrich_waterfall(
     return _json(_run_enrich_or_raise())
 
 
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Enrich one person (phone + LinkedIn + email)",
+        readOnlyHint=False,
+        openWorldHint=True,
+        destructiveHint=False,
+    )
+)
+def enrich_person(
+    client_tag: str,
+    email: str = "",
+    first_name: str = "",
+    last_name: str = "",
+    full_name: str = "",
+    linkedin_url: str = "",
+    company_name: str = "",
+    domain: str = "",
+    need: str = "both",
+    max_tier: str = "fullenrich",
+    write_supabase: bool = False,
+) -> str:
+    """Look up one prospect through the waterfall and return that compact hit.
+
+    For ReplyHandler Slack cards. Returns email / phone / linkedin_url /
+    website / source tiers — not a bulk payload dump. FullEnrich runs for
+    both work email and cellphone when max_tier is fullenrich.
+    Default write_supabase=false so a Slack-card lookup does not create
+    {tag}_wf_* rows unless asked.
+    """
+    _ensure_repo_cwd()
+    _reload_settings()
+    from email_waterfall import waterfall as wf
+
+    try:
+        return _json(
+            wf.enrich_one_person(
+                client_tag=client_tag,
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                full_name=full_name,
+                linkedin_url=linkedin_url,
+                company_name=company_name,
+                domain=domain,
+                need=need,
+                max_tier=max_tier,
+                write_supabase=bool(write_supabase),
+            )
+        )
+    except Exception as exc:
+        _tool_error(exc)
+
+
 def _mount_http_routes() -> None:
     try:
         from starlette.requests import Request
@@ -678,6 +732,45 @@ def _mount_http_routes() -> None:
                 ),
             }
         )
+
+    @mcp.custom_route("/enrich-one", methods=["POST"])
+    async def enrich_one_http(request: Request) -> JSONResponse:
+        """ReplyHandler one-person lookup. Same as the enrich_person MCP tool."""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "reason": "invalid_json"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"ok": False, "reason": "invalid_json"}, status_code=400)
+        tag = str(body.get("client_tag") or "").strip()
+        if not tag:
+            return JSONResponse(
+                {"ok": False, "reason": "client_tag is required"}, status_code=400
+            )
+        _ensure_repo_cwd()
+        _reload_settings()
+        from email_waterfall import waterfall as wf
+
+        try:
+            hit = wf.enrich_one_person(
+                client_tag=tag,
+                email=str(body.get("email") or ""),
+                first_name=str(body.get("first_name") or ""),
+                last_name=str(body.get("last_name") or ""),
+                full_name=str(body.get("full_name") or body.get("name") or ""),
+                linkedin_url=str(body.get("linkedin_url") or ""),
+                company_name=str(body.get("company_name") or ""),
+                domain=str(body.get("domain") or ""),
+                need=str(body.get("need") or "both"),
+                max_tier=str(body.get("max_tier") or "fullenrich"),
+                write_supabase=bool(body.get("write_supabase") or False),
+            )
+        except Exception as exc:
+            return JSONResponse(
+                {"ok": False, "reason": f"{type(exc).__name__}: {exc}"},
+                status_code=400,
+            )
+        return JSONResponse(hit)
 
 
 _mount_http_routes()
