@@ -70,6 +70,65 @@ def _reload_settings() -> None:
     cfg.settings = cfg.load_settings()
 
 
+PAID_CREDIT_FLOOR = 50
+
+
+def _credits_remaining(payload: Any) -> float | None:
+    if isinstance(payload, (int, float)) and not isinstance(payload, bool):
+        return float(payload)
+    if not isinstance(payload, dict):
+        return None
+    for key in (
+        "credits_remaining",
+        "credits",
+        "remaining",
+        "balance",
+        "total",
+        "available",
+        "availableCredits",
+        "available_credits",
+    ):
+        val = payload.get(key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return float(val)
+        if isinstance(val, dict):
+            inner = (
+                val.get("remaining")
+                or val.get("credits")
+                or val.get("total")
+                or val.get("available")
+            )
+            if isinstance(inner, (int, float)) and not isinstance(inner, bool):
+                return float(inner)
+    return None
+
+
+def _paid_vendor_balance(name: str, client: Any) -> dict[str, Any]:
+    if not getattr(client, "enabled", False):
+        return {"configured": False, "credits_remaining": None, "ok": True}
+    try:
+        payload = client.credits()
+    except Exception as exc:
+        return {
+            "configured": True,
+            "credits_remaining": None,
+            "ok": True,
+            "reason": f"{name}_credits_unavailable: {exc}"[:200],
+        }
+    remaining = _credits_remaining(payload)
+    snap: dict[str, Any] = {
+        "configured": True,
+        "credits_remaining": remaining,
+        "ok": True,
+    }
+    if remaining is not None and remaining < PAID_CREDIT_FLOOR:
+        snap["ok"] = False
+        snap["reason"] = (
+            f"{name} credits_remaining={remaining:g} (min {PAID_CREDIT_FLOOR})"
+        )
+    return snap
+
+
 def _smartlead_credits() -> dict[str, Any]:
     from email_waterfall.vendors.smartlead import SmartleadClient
 
@@ -110,16 +169,26 @@ def when_to_use_prompt() -> str:
     )
 )
 def health() -> str:
-    """Show which vendor keys and Supabase credentials are configured. Never prints secrets."""
+    """Show vendor keys plus live paid-vendor balances. Never prints secrets."""
     _ensure_repo_cwd()
     _reload_settings()
     from email_waterfall.clients import list_registered_clients
     from email_waterfall.config import settings
+    from email_waterfall.vendors.ai_ark import AiArkClient
     from email_waterfall.vendors.getleads import GetLeadsClient
+    from email_waterfall.vendors.leadmagic import LeadMagicClient
 
+    aiark = _paid_vendor_balance("aiark", AiArkClient(timeout=8))
+    leadmagic = _paid_vendor_balance("leadmagic", LeadMagicClient(timeout=8))
+    reasons = [
+        snap["reason"]
+        for snap in (aiark, leadmagic)
+        if snap.get("configured") and snap.get("ok") is False and snap.get("reason")
+    ]
     return _json(
         {
-            "ok": True,
+            "ok": not reasons,
+            "reason": "; ".join(reasons) if reasons else None,
             "service": "email-waterfall",
             "product": "dm_email_enrichment",
             "not": ["google_maps_scraper", "website_crawler", "apify_contact_scraper"],
@@ -128,13 +197,14 @@ def health() -> str:
             "vendors": {
                 "getleads": GetLeadsClient().health_snapshot(),
                 "smartlead": bool(settings.smartlead_api_key),
-                "aiark": bool(settings.ai_ark_api_key),
-                "leadmagic": bool(settings.leadmagic_api_key),
+                "aiark": aiark,
+                "leadmagic": leadmagic,
                 "prospeo": bool(settings.prospeo_api_key),
                 "fullenrich": bool(settings.fullenrich_api_key),
                 "veriphone": bool(settings.veriphone_api_key),
             },
             "smartlead_credits": _smartlead_credits(),
+            "paid_credit_floor": PAID_CREDIT_FLOOR,
             "clients": {
                 c.tag: {
                     "companies_table": c.companies_table,

@@ -493,8 +493,12 @@ class Waterfall:
         hit: EmailHit | None = None
 
         if has_name_domain and self.getleads.enabled and self._allowed("getleads"):
-            self._bump_attempt("getleads", row)
-            hit = self.getleads.find_email(first, last, domain, company)
+            before = _int_attr(self.getleads, "calls")
+            hit = self.getleads.find_email(
+                first, last, domain, company, linkedin_url=linkedin
+            )
+            if _int_attr(self.getleads, "calls") > before:
+                self._bump_attempt("getleads", row)
             if hit:
                 self._bump("getleads", "email_hits")
 

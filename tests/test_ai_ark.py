@@ -218,3 +218,18 @@ def test_find_mobile_miss_is_none(monkeypatch) -> None:
 
     monkeypatch.setattr(client, "_post", fake_post)
     assert client.find_mobile("Jane", "Smith", "roofco.com") is None
+
+
+def test_credits_reads_payments_balance(monkeypatch) -> None:
+    client = AiArkClient(api_key="tok")
+    paths: list[str] = []
+
+    def fake_get(path):
+        paths.append(path)
+        return 200, {"total": 100}
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    assert client.credits() == {"total": 100}
+    assert paths == ["/v1/payments/credits"]
+    assert client.calls == 0
+    assert client.errors == 0

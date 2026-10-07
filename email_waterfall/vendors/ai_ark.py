@@ -131,6 +131,28 @@ class AiArkClient:
             "Accept": "application/json",
         }
 
+    def _get(self, path: str) -> tuple[int, Any]:
+        """Balance/health GET — does not increment finder calls or errors."""
+        if not self.enabled:
+            return 0, None
+        url = f"{self.base_url}{path}"
+        r = http_client.get(
+            self.tier, url, headers=self._headers(), timeout=self.timeout
+        )
+        if r is None:
+            return 0, None
+        try:
+            data = r.json()
+        except ValueError:
+            data = None
+        return r.status_code, data
+
+    def credits(self) -> dict[str, Any]:
+        status, data = self._get("/v1/payments/credits")
+        if status >= 400 or not isinstance(data, dict):
+            status, data = self._get("/credits")
+        return data if isinstance(data, dict) else {}
+
     def _post(self, path: str, body: dict[str, Any]) -> tuple[int, Any]:
         if not self.enabled:
             return 0, None
