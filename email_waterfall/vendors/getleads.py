@@ -55,29 +55,95 @@ SEARCH_NAME_HINTS = (
 )
 NAME_KEYS = {"first_name", "firstname", "first", "given_name", "givenname"}
 LAST_KEYS = {"last_name", "lastname", "last", "family_name", "familyname"}
-DOMAIN_KEYS = {"domain", "company_domain", "companydomain", "website", "company_website"}
+DOMAIN_KEYS = {
+    "domain",
+    "company_domain",
+    "companydomain",
+    "website",
+    "company_website",
+    "email_domain",
+    "emaildomain",
+}
+EMAIL_DOMAIN_KEYS = {
+    "email_domain",
+    "emaildomain",
+    "domain",
+    "company_domain",
+    "companydomain",
+    "website",
+    "company_website",
+}
 COMPANY_KEYS = {"company_name", "companyname", "company", "organization"}
 TITLE_KEYS = {"title", "titles", "job_title", "jobtitle", "job_titles", "jobtitles", "headline"}
+LINKEDIN_KEYS = {
+    "linkedin_url",
+    "linkedin",
+    "profile_url",
+    "profileurl",
+    "li_url",
+    "linkedinurl",
+}
 INDUSTRY_KEYS = {"industry", "industries", "naics", "sic"}
 GEO_KEYS = {"location", "locations", "state", "states", "geo", "country", "region", "city"}
 SENIORITY_KEYS = {"seniority", "job_level", "joblevel", "management_level"}
 HEADCOUNT_KEYS = {"headcount", "employee_count", "employees", "company_size", "size"}
+ALIAS_GROUPS: dict[str, set[str]] = {
+    "first_name": NAME_KEYS,
+    "last_name": LAST_KEYS,
+    "domain": DOMAIN_KEYS,
+    "email_domain": EMAIL_DOMAIN_KEYS,
+    "company_name": COMPANY_KEYS,
+    "titles": TITLE_KEYS,
+    "title": TITLE_KEYS,
+    "linkedin_url": LINKEDIN_KEYS,
+    "page": {"page", "page_index", "pageindex", "offset"},
+    "size": {"size", "limit", "page_size", "pagesize", "per_page", "perpage", "count"},
+    "industry": INDUSTRY_KEYS,
+    "location": GEO_KEYS,
+    "state": {"state", "states", "region"},
+    "seniority": SENIORITY_KEYS,
+    "headcount": HEADCOUNT_KEYS,
+    "filters": {"filters", "filter", "query_filters"},
+    "query": {"query", "q", "search", "prompt"},
+    "items": {"items", "rows", "records", "batch"},
+}
 
 
 def _norm_key(key: str) -> str:
     return key.lower().replace("-", "_").replace(" ", "_")
 
 
-def _schema_props(tool: dict[str, Any]) -> dict[str, Any]:
+def _input_schema(tool: dict[str, Any]) -> dict[str, Any]:
     schema = tool.get("inputSchema") or tool.get("input_schema") or {}
-    if not isinstance(schema, dict):
+    return schema if isinstance(schema, dict) else {}
+
+
+def _schema_props(tool: dict[str, Any]) -> dict[str, Any]:
+    props = _input_schema(tool).get("properties") or {}
+    return props if isinstance(props, dict) else {}
+
+
+def _item_object_schema(tool: dict[str, Any]) -> dict[str, Any] | None:
+    """If the tool takes a batch under `items: [{...}]`, return the item object schema."""
+    items = _schema_props(tool).get("items")
+    if not isinstance(items, dict) or items.get("type") != "array":
+        return None
+    inner = items.get("items")
+    if isinstance(inner, dict) and (inner.get("type") == "object" or inner.get("properties")):
+        return inner
+    return None
+
+
+def _item_props(tool: dict[str, Any]) -> dict[str, Any]:
+    item_schema = _item_object_schema(tool)
+    if not item_schema:
         return {}
-    props = schema.get("properties") or {}
+    props = item_schema.get("properties") or {}
     return props if isinstance(props, dict) else {}
 
 
 def _prop_keys(tool: dict[str, Any]) -> set[str]:
-    return {_norm_key(k) for k in _schema_props(tool)}
+    return {_norm_key(k) for k in list(_schema_props(tool)) + list(_item_props(tool))}
 
 
 def _tool_name(tool: dict[str, Any]) -> str:
@@ -103,6 +169,8 @@ def score_email_tool(tool: dict[str, Any]) -> int:
     has_company = bool(keys & COMPANY_KEYS)
     if has_first and has_last and (has_domain or has_company):
         score += 8
+    if bool(keys & LINKEDIN_KEYS) and "email" in name:
+        score += 7
     if "email" in desc and any(w in desc for w in ("find", "enrich", "work")):
         score += 2
     if any(h in name for h in SEARCH_NAME_HINTS) and "email" not in name:
@@ -175,59 +243,121 @@ def _find_prop(props: dict[str, Any], candidates: set[str]) -> str | None:
     return None
 
 
+def _coerce_prop(dest_schema: dict[str, Any], value: Any) -> Any:
+    dest_type = str(dest_schema.get("type") or "")
+    if dest_type == "array" and not isinstance(value, list):
+        return [value]
+    if dest_type != "array" and isinstance(value, list):
+        return value[0] if value else value
+    return value
+
+
+def _map_onto_props(
+    props: dict[str, Any], values: dict[str, Any], *, used: set[str] | None = None
+) -> dict[str, Any]:
+    used = used if used is not None else set()
+    out: dict[str, Any] = {}
+    for our_key, value in values.items():
+        if value in (None, "", [], {}):
+            continue
+        group = ALIAS_GROUPS.get(our_key, {_norm_key(our_key)})
+        dest = _find_prop(props, group)
+        if not dest or dest in used:
+            continue
+        dest_schema = props.get(dest) if isinstance(props.get(dest), dict) else {}
+        out[dest] = _coerce_prop(dest_schema if isinstance(dest_schema, dict) else {}, value)
+        used.add(dest)
+    return out
+
+
+def _wrap_items(tool: dict[str, Any], values: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Build `items: [{...}]` from a single row when the live schema requires it."""
+    raw_items = values.get("items")
+    if isinstance(raw_items, list) and raw_items:
+        return [r for r in raw_items if isinstance(r, dict)]
+    item_schema = _item_object_schema(tool)
+    if not item_schema:
+        return None
+    item_props = _item_props(tool)
+    if not item_props:
+        return None
+    item = _map_onto_props(item_props, values)
+    return [item] if item else None
+
+
 def map_arguments(tool: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
     """Copy our values onto the tool's real property names. Skip unknown keys."""
     props = _schema_props(tool)
     if not props:
         # No schema advertised — pass values as-is so the server can reject them.
         return {k: v for k, v in values.items() if v not in (None, "", [], {})}
-    out: dict[str, Any] = {}
-    alias_groups = {
-        "first_name": NAME_KEYS,
-        "last_name": LAST_KEYS,
-        "domain": DOMAIN_KEYS,
-        "company_name": COMPANY_KEYS,
-        "titles": TITLE_KEYS,
-        "title": TITLE_KEYS,
-        "page": {"page", "page_index", "pageindex", "offset"},
-        "size": {"size", "limit", "page_size", "pagesize", "per_page", "perpage", "count"},
-        "industry": INDUSTRY_KEYS,
-        "location": GEO_KEYS,
-        "state": {"state", "states", "region"},
-        "seniority": SENIORITY_KEYS,
-        "headcount": HEADCOUNT_KEYS,
-        "filters": {"filters", "filter", "query_filters"},
-        "query": {"query", "q", "search", "prompt"},
-    }
-    used: set[str] = set()
-    for our_key, value in values.items():
-        if value in (None, "", [], {}):
-            continue
-        group = alias_groups.get(our_key, {_norm_key(our_key)})
-        dest = _find_prop(props, group)
-        if not dest or dest in used:
-            continue
-        dest_schema = props.get(dest) if isinstance(props.get(dest), dict) else {}
-        dest_type = str(dest_schema.get("type") or "")
-        if dest_type == "array" and not isinstance(value, list):
-            out[dest] = [value]
-        elif dest_type != "array" and isinstance(value, list):
-            out[dest] = value[0] if value else value
-        else:
-            out[dest] = value
-        used.add(dest)
+    out = _map_onto_props(props, values)
+    items = _wrap_items(tool, values)
+    items_key = _find_prop(props, {"items", "rows", "records", "batch"})
+    if items_key and items:
+        out[items_key] = items
+    elif items_key and items_key in out and not isinstance(out[items_key], list):
+        # Never send a scalar where the schema wants the batch array.
+        out.pop(items_key, None)
     # Nested filters object: dump leftover ICP fields into it.
     filters_key = _find_prop(props, {"filters", "filter"})
     if filters_key and filters_key not in out:
         leftover = {
             k: v
             for k, v in values.items()
-            if k not in alias_groups
-            and v not in (None, "", [], {})
+            if k not in ALIAS_GROUPS and v not in (None, "", [], {})
         }
         if leftover:
             out[filters_key] = leftover
+    extra_ok = _input_schema(tool).get("additionalProperties", True)
+    if extra_ok is False:
+        out = {k: v for k, v in out.items() if k in props}
     return out
+
+
+def arguments_valid(tool: dict[str, Any], arguments: dict[str, Any]) -> bool:
+    """True when mapped args satisfy required fields on the live tools/list schema."""
+    schema = _input_schema(tool)
+    required = schema.get("required") or []
+    if not isinstance(required, list):
+        required = []
+    for key in required:
+        val = arguments.get(key)
+        if val in (None, "", [], {}):
+            return False
+    item_schema = _item_object_schema(tool)
+    if not item_schema:
+        return True
+    items = arguments.get("items")
+    if not isinstance(items, list) or not items:
+        return False
+    item_required = item_schema.get("required") or []
+    if not isinstance(item_required, list):
+        item_required = []
+    for item in items:
+        if not isinstance(item, dict):
+            return False
+        for key in item_required:
+            if item.get(key) in (None, "", [], {}):
+                return False
+    return True
+
+
+def pick_satisfiable_tool(
+    tools: list[dict[str, Any]],
+    scorer,
+    values: dict[str, Any],
+    *,
+    min_score: int = 6,
+) -> dict[str, Any] | None:
+    ranked = sorted(((scorer(t), t) for t in tools), key=lambda x: x[0], reverse=True)
+    for score, tool in ranked:
+        if score < min_score:
+            break
+        mapped = map_arguments(tool, values)
+        if arguments_valid(tool, mapped):
+            return tool
+    return None
 
 
 def _looks_like_person_dict(row: Any) -> bool:
@@ -424,6 +554,16 @@ class GetLeadsClient:
         self._mcp = mcp
         self._tools = tools
         self._tools_lock = threading.Lock()
+        if self._tools is None:
+            self._warm_tools()
+
+    def _warm_tools(self) -> None:
+        """tools/list at client startup so later calls validate against the live schema."""
+        try:
+            if self.enabled:
+                self.list_tools()
+        except Exception as exc:
+            log.info("getleads tools/list at startup failed: %s", exc)
 
     def _manager(self) -> OAuthTokenManager:
         if self._token is None:
@@ -507,8 +647,10 @@ class GetLeadsClient:
         }
 
     def _call(self, tool: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
-        self.calls += 1
         mapped = map_arguments(tool, arguments)
+        if not arguments_valid(tool, mapped):
+            return None
+        self.calls += 1
         try:
             return self._client().call_tool(_tool_name(tool), mapped)
         except McpError as exc:
@@ -531,33 +673,41 @@ class GetLeadsClient:
             return None
 
     def find_email(
-        self, first_name: str, last_name: str, domain: str, company_name: str = ""
+        self,
+        first_name: str,
+        last_name: str,
+        domain: str,
+        company_name: str = "",
+        *,
+        linkedin_url: str = "",
     ) -> EmailHit | None:
         assert_capability(CAP_EMAIL, vendor=self.tier, endpoint="mcp tools/call")
         if not self.enabled:
             return None
+        linkedin_url = (linkedin_url or "").strip()
+        values = {
+            "first_name": first_name,
+            "last_name": last_name,
+            "domain": domain,
+            "email_domain": domain,
+            "company_name": company_name or domain,
+            "linkedin_url": linkedin_url,
+        }
         try:
             tools = self.list_tools()
         except Exception as exc:
             bump_errors(self)
             log_vendor_failure(self.tier, settings.getleads_mcp_url, error=str(exc))
             return None
-        tool = pick_tool(tools, score_email_tool)
+        tool = pick_satisfiable_tool(tools, score_email_tool, values)
         if not tool:
             _log_gap_once(
                 "_MISSING_EMAIL_LOGGED",
-                "getleads has no tools/list entry covering find work email by name+domain; skipping find_email",
+                "getleads has no tools/list entry covering find work email "
+                "(or row lacks fields the live schema requires, e.g. linkedin_url); skipping find_email",
             )
             return None
-        data = self._call(
-            tool,
-            {
-                "first_name": first_name,
-                "last_name": last_name,
-                "domain": domain,
-                "company_name": company_name or domain,
-            },
-        )
+        data = self._call(tool, values)
         if not data:
             return None
         email, status = extract_email(data)
