@@ -173,7 +173,7 @@ def _enrich_waterfall_parallel(
     client: ClientConfig,
     need_norm: str,
     max_tier_n: str,
-    titles: list[str],
+    titles=titles,
     require_title_match: bool,
     write_supabase: bool,
     wf: Waterfall,
@@ -401,3 +401,4 @@ def enrich_waterfall(
         progress_callback=progress_callback,
         table_src=table_src,
     )
+
