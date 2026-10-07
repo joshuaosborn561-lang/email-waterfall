@@ -48,3 +48,18 @@ def test_find_mobile_not_found(monkeypatch) -> None:
 def test_find_mobile_requires_identifier() -> None:
     client = LeadMagicClient(api_key="lm_test")
     assert client.find_mobile() is None
+
+
+def test_credits_reads_v1_balance(monkeypatch) -> None:
+    client = LeadMagicClient(api_key="lm_test")
+    paths: list[str] = []
+
+    def fake_get(path):
+        paths.append(path)
+        return 200, {"credits": 15432.5}
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    assert client.credits() == {"credits": 15432.5}
+    assert paths == ["/v1/credits"]
+    assert client.calls == 0
+    assert client.errors == 0
