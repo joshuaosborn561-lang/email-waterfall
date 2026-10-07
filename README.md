@@ -57,7 +57,9 @@ On `need='phone'` only, every candidate number (input or vendor) is checked with
 
 ## Name + company (no domain)
 
-Rows with `first_name` + `last_name` + `company_name` and no domain are tagged `mode=name_company`. They skip getleads and Smartlead and enter at AI Ark → LeadMagic → Prospeo → FullEnrich. `company_name` is sent to FullEnrich verbatim (never replaced with a domain string). When a tier returns an email, its domain is written onto the row for later tiers.
+Rows with `first_name` + `last_name` + `company_name` and no domain are tagged `mode=name_company`. GetLeads uses `getleads_enrich_person_batch` (name + company; never the LinkedIn batch tool). Smartlead is skipped (needs a domain). Then AI Ark → LeadMagic → Prospeo → FullEnrich. `company_name` is sent to FullEnrich verbatim (never replaced with a domain string). When a tier returns an email, its domain is written onto the row for later tiers.
+
+GetLeads email routing is explicit: `linkedin_url` → `getleads_get_emails_from_linkedin_batch` with `{items:[{linkedin_url}], limit_per_item:1}`; first + last + (domain or company) → `getleads_enrich_person_batch` with a non-empty `items` array (up to 50 per call); otherwise the tier is skipped and no MCP call is sent. A vendor that errors on more than 20 of its first 25 calls is disabled for the rest of the job. `get_job_status` reports `tier_stats.*.first_error` and GetLeads `credits_charged` (1 credit per successful enrich row).
 
 ## MCP tool: `getleads_search`
 

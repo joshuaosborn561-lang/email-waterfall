@@ -28,6 +28,7 @@ Writes to public.{client}_companies / public.{client}_contacts.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Literal
@@ -62,6 +63,8 @@ from .vendors.prospeo import ProspeoClient
 from .vendors.smartlead import SmartleadClient
 from .vendors.veriphone import VeriphoneClient, VeriphoneResult
 
+log = logging.getLogger("email_waterfall.waterfall")
+
 Need = Literal["email", "dm", "both", "phone", "people_email"]
 MaxTier = Literal["getleads", "smartlead", "aiark", "leadmagic", "prospeo", "fullenrich"]
 
@@ -75,7 +78,15 @@ TIER_ORDER: list[str] = [
 ]
 TIER_RANK = {name: i for i, name in enumerate(TIER_ORDER)}
 DEFAULT_MAX_TIER: MaxTier = "leadmagic"
-NAME_COMPANY_TIERS: tuple[str, ...] = ("aiark", "leadmagic", "prospeo", "fullenrich")
+NAME_COMPANY_TIERS: tuple[str, ...] = (
+    "getleads",
+    "aiark",
+    "leadmagic",
+    "prospeo",
+    "fullenrich",
+)
+CIRCUIT_WINDOW = 25
+CIRCUIT_ERROR_LIMIT = 20
 CREDIT_PER_ATTEMPT: dict[str, float] = {
     "getleads": 1.0,
     "smartlead": 1.0,
@@ -407,6 +418,8 @@ class Waterfall:
         self._email_cache: dict[tuple[str, ...], EmailHit | None] = {}
         self._phone_cache: dict[tuple[str, ...], PhoneHit | None] = {}
         self._veriphone_cache: dict[str, VeriphoneResult | None] = {}
+        self._circuit_outcomes: dict[str, list[bool]] = {}
+        self._circuit_disabled: dict[str, str] = {}
         self._lock = threading.Lock()
 
     @staticmethod
@@ -440,7 +453,27 @@ class Waterfall:
         set_need(self.need, self.caps)
 
     def _allowed(self, tier: str) -> bool:
+        if tier in self._circuit_disabled:
+            return False
         return tier_allowed(tier, self.max_tier)
+
+    def _note_circuit(self, tier: str, errored: bool) -> None:
+        """Disable a tier after more than 20 errors in its first 25 calls."""
+        with self._lock:
+            if tier in self._circuit_disabled:
+                return
+            outcomes = self._circuit_outcomes.setdefault(tier, [])
+            if len(outcomes) >= CIRCUIT_WINDOW:
+                return
+            outcomes.append(bool(errored))
+            errors = sum(1 for flag in outcomes if flag)
+            if errors > CIRCUIT_ERROR_LIMIT:
+                reason = f"circuit open: {errors} errors in first {len(outcomes)} calls"
+                self._circuit_disabled[tier] = reason
+                self.tier_stats.setdefault(tier, _empty_stats())
+                self.tier_stats[tier]["disabled"] = True
+                self.tier_stats[tier]["disabled_reason"] = reason
+                log.warning("tier disabled tier=%s reason=%s", tier, reason)
 
     def _pick(self, people: list[PersonHit]) -> PersonHit | None:
         ranked = pick_best_person(
@@ -492,15 +525,22 @@ class Waterfall:
 
         hit: EmailHit | None = None
 
-        if has_name_domain and self.getleads.enabled and self._allowed("getleads"):
+        can_getleads = bool(linkedin or (first and last and (domain or company)))
+        if can_getleads and self.getleads.enabled and self._allowed("getleads"):
             before = _int_attr(self.getleads, "calls")
+            before_e = _int_attr(self.getleads, "errors")
             hit = self.getleads.find_email(
                 first, last, domain, company, linkedin_url=linkedin
             )
             if _int_attr(self.getleads, "calls") > before:
                 self._bump_attempt("getleads", row)
+                self._note_circuit(
+                    "getleads", _int_attr(self.getleads, "errors") > before_e
+                )
             if hit:
                 self._bump("getleads", "email_hits")
+                _fill_row_domain(row, email=hit.email, raw=hit.raw)
+                domain = row.get("domain") or domain
 
         if (
             not hit
@@ -508,12 +548,17 @@ class Waterfall:
             and self.smartlead.enabled
             and self._allowed("smartlead")
         ):
+            before_e = _int_attr(self.smartlead, "errors")
             self._bump_attempt("smartlead", row)
             hit = self.smartlead.find_email(first, last, domain, company)
+            self._note_circuit(
+                "smartlead", _int_attr(self.smartlead, "errors") > before_e
+            )
             if hit:
                 self._bump("smartlead", "email_hits")
 
         if not hit and can_aiark and self.ai_ark.enabled and self._allowed("aiark"):
+            before_e = _int_attr(self.ai_ark, "errors")
             self._bump_attempt("aiark", row)
             hit = self.ai_ark.find_email(
                 first,
@@ -525,6 +570,7 @@ class Waterfall:
                 person_id=person_id,
                 full_name=row.get("full_name") or "",
             )
+            self._note_circuit("aiark", _int_attr(self.ai_ark, "errors") > before_e)
             if hit:
                 self._bump("aiark", "email_hits")
                 _fill_row_domain(row, email=hit.email, raw=hit.raw)
@@ -536,8 +582,12 @@ class Waterfall:
             and self.leadmagic.enabled
             and self._allowed("leadmagic")
         ):
+            before_e = _int_attr(self.leadmagic, "errors")
             self._bump_attempt("leadmagic", row)
             hit = self.leadmagic.find_email(first, last, domain, company)
+            self._note_circuit(
+                "leadmagic", _int_attr(self.leadmagic, "errors") > before_e
+            )
             if hit:
                 self._bump("leadmagic", "email_hits")
                 _fill_row_domain(row, email=hit.email, raw=hit.raw)
@@ -545,6 +595,7 @@ class Waterfall:
 
         can_prospeo = bool(linkedin or has_name_domain or has_name_company)
         if not hit and can_prospeo and self.prospeo.enabled and self._allowed("prospeo"):
+            before_e = _int_attr(self.prospeo, "errors")
             self._bump_attempt("prospeo", row)
             hit = self.prospeo.find_email(
                 first,
@@ -553,6 +604,9 @@ class Waterfall:
                 company,
                 linkedin_url=linkedin,
                 full_name=row.get("full_name") or "",
+            )
+            self._note_circuit(
+                "prospeo", _int_attr(self.prospeo, "errors") > before_e
             )
             if hit:
                 self._bump("prospeo", "email_hits")
@@ -566,8 +620,12 @@ class Waterfall:
             and self.fullenrich.enabled
             and self._allowed("fullenrich")
         ):
+            before_e = _int_attr(self.fullenrich, "errors")
             self._bump_attempt("fullenrich", row)
             hit = self.fullenrich.find_email(first, last, domain, company)
+            self._note_circuit(
+                "fullenrich", _int_attr(self.fullenrich, "errors") > before_e
+            )
             if hit:
                 self._bump("fullenrich", "email_hits")
                 _fill_row_domain(row, email=hit.email, raw=hit.raw)
@@ -648,6 +706,9 @@ class Waterfall:
         if vendors:
             assert_capability(CAP_PEOPLE, vendor="waterfall", endpoint="resolve_dm")
         for tier, client in vendors:
+            if not self._allowed(tier):
+                continue
+            before_e = _int_attr(client, "errors")
             self._bump_attempt(tier, row)
             if domain:
                 people = client.find_people(
@@ -662,6 +723,7 @@ class Waterfall:
                     titles=self.target_titles,
                     full_name=row.get("full_name") or "",
                 )
+            self._note_circuit(tier, _int_attr(client, "errors") > before_e)
             picked = self._pick(people)
             if picked:
                 self._bump(tier, "dm_hits")
@@ -814,6 +876,7 @@ class Waterfall:
 
         hit: PhoneHit | None = None
         if eligible.get("aiark"):
+            before_e = _int_attr(self.ai_ark, "errors")
             self._bump_attempt("aiark", row)
             found = self.ai_ark.find_mobile(
                 first,
@@ -823,6 +886,7 @@ class Waterfall:
                 linkedin_url=linkedin,
                 full_name=full,
             )
+            self._note_circuit("aiark", _int_attr(self.ai_ark, "errors") > before_e)
             if found:
                 hit = self._accept_phone(
                     found.phone, source_tier=found.source_tier, raw=found.raw
@@ -831,9 +895,13 @@ class Waterfall:
                     self._bump("aiark", "phone_hits")
 
         if not hit and eligible.get("leadmagic"):
+            before_e = _int_attr(self.leadmagic, "errors")
             self._bump_attempt("leadmagic", row)
             found = self.leadmagic.find_mobile(
                 linkedin_url=linkedin, work_email=work_email
+            )
+            self._note_circuit(
+                "leadmagic", _int_attr(self.leadmagic, "errors") > before_e
             )
             if found:
                 hit = self._accept_phone(
@@ -843,6 +911,7 @@ class Waterfall:
                     self._bump("leadmagic", "phone_hits")
 
         if not hit and eligible.get("prospeo"):
+            before_e = _int_attr(self.prospeo, "errors")
             self._bump_attempt("prospeo", row)
             found = self.prospeo.find_mobile(
                 first,
@@ -851,6 +920,9 @@ class Waterfall:
                 row.get("company_name") or "",
                 linkedin_url=linkedin,
                 full_name=full,
+            )
+            self._note_circuit(
+                "prospeo", _int_attr(self.prospeo, "errors") > before_e
             )
             if found:
                 hit = self._accept_phone(
@@ -1083,6 +1155,9 @@ def _tier_warnings(
         errors = int(stats.get("errors") or 0)
         if calls >= 10 and errors * 2 > calls:
             warnings.append(name)
+        if stats.get("disabled") and name not in warnings:
+            reason = stats.get("disabled_reason") or "disabled"
+            warnings.append(f"{name}: {reason}")
     if (need_norm == "phone" or verify_only) and not veriphone_enabled:
         warnings.append("veriphone_unconfigured")
     return warnings
@@ -1101,6 +1176,16 @@ def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]
         wf.tier_stats[name]["vendor_calls"] = _int_attr(vendor, "calls")
         wf.tier_stats[name]["vendor_hits"] = _int_attr(vendor, "hits")
         wf.tier_stats[name]["errors"] = _int_attr(vendor, "errors")
+        first_err = getattr(vendor, "first_error", None)
+        if first_err:
+            wf.tier_stats[name]["first_error"] = str(first_err)[:300]
+        charged = getattr(vendor, "credits_charged", None)
+        if charged is not None:
+            wf.tier_stats[name]["credits_charged"] = int(charged or 0)
+        disabled_reason = getattr(wf, "_circuit_disabled", {}).get(name)
+        if disabled_reason:
+            wf.tier_stats[name]["disabled"] = True
+            wf.tier_stats[name]["disabled_reason"] = disabled_reason
         snap = getattr(vendor, "credit_snapshot", None)
         if callable(snap):
             credits = snap()
@@ -1128,6 +1213,13 @@ def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]
             row["credits_total"] = stats.get("credits_total")
             row["credits_used"] = stats.get("credits_used")
             row["credits_exhausted"] = bool(stats.get("credits_exhausted"))
+        if stats.get("first_error"):
+            row["first_error"] = stats["first_error"]
+        if "credits_charged" in stats:
+            row["credits_charged"] = stats["credits_charged"]
+        if stats.get("disabled"):
+            row["disabled"] = True
+            row["disabled_reason"] = stats.get("disabled_reason")
         tier_breakdown[tier_name] = row
     return tier_breakdown
 

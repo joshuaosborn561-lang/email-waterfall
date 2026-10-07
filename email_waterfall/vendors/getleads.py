@@ -20,6 +20,10 @@ from email_waterfall.vendors.oauth_token import OAuthTokenManager
 
 log = logging.getLogger("email_waterfall.vendors.getleads")
 
+LINKEDIN_EMAIL_TOOL = "getleads_get_emails_from_linkedin_batch"
+PERSON_ENRICH_TOOL = "getleads_enrich_person_batch"
+PERSON_BATCH_MAX = 50
+
 _MISSING_EMAIL_LOGGED = False
 _MISSING_PEOPLE_LOGGED = False
 _MISSING_SEARCH_LOGGED = False
@@ -360,6 +364,57 @@ def pick_satisfiable_tool(
     return None
 
 
+def items_ready(arguments: dict[str, Any] | None) -> bool:
+    """True when `items` is a non-empty list of objects (never send undefined)."""
+    if not isinstance(arguments, dict):
+        return False
+    items = arguments.get("items")
+    if not isinstance(items, list) or not items:
+        return False
+    return all(isinstance(row, dict) and row for row in items)
+
+
+def person_enrich_item(
+    first_name: str,
+    last_name: str,
+    domain: str = "",
+    company_name: str = "",
+) -> dict[str, Any] | None:
+    first = (first_name or "").strip()
+    last = (last_name or "").strip()
+    domain = (domain or "").strip()
+    company = (company_name or "").strip()
+    if not (first and last and (domain or company)):
+        return None
+    item: dict[str, Any] = {"first_name": first, "last_name": last}
+    if domain:
+        item["email_domain"] = domain
+    if company:
+        item["company_name"] = company
+    return item
+
+
+def route_email_lookup(
+    *,
+    linkedin_url: str = "",
+    first_name: str = "",
+    last_name: str = "",
+    domain: str = "",
+    company_name: str = "",
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Pick the GetLeads tool from the row. Never return an empty items array."""
+    linkedin = (linkedin_url or "").strip()
+    if linkedin:
+        return LINKEDIN_EMAIL_TOOL, {
+            "items": [{"linkedin_url": linkedin}],
+            "limit_per_item": 1,
+        }
+    item = person_enrich_item(first_name, last_name, domain, company_name)
+    if item:
+        return PERSON_ENRICH_TOOL, {"items": [item]}
+    return None, None
+
+
 def _looks_like_person_dict(row: Any) -> bool:
     if not isinstance(row, dict):
         return False
@@ -550,10 +605,13 @@ class GetLeadsClient:
         self.calls = 0
         self.hits = 0
         self.errors = 0
+        self.credits_charged = 0
+        self.first_error: str | None = None
         self._token = token_manager
         self._mcp = mcp
         self._tools = tools
         self._tools_lock = threading.Lock()
+        self._stats_lock = threading.Lock()
         if self._tools is None:
             self._warm_tools()
 
@@ -646,31 +704,109 @@ class GetLeadsClient:
             "inputSchema": tool.get("inputSchema") or tool.get("input_schema"),
         }
 
+    def _tool_by_name(self, name: str) -> dict[str, Any] | None:
+        try:
+            tools = self.list_tools()
+        except Exception:
+            return None
+        for tool in tools:
+            if _tool_name(tool) == name:
+                return tool
+        return None
+
+    def _note_success(self, *, email: bool, charged: bool) -> None:
+        with self._stats_lock:
+            if charged:
+                self.credits_charged += 1
+            if email:
+                self.hits += 1
+
+    def _record_call_error(self, exc: BaseException, *, status: int | str | None = None, body: str = "") -> None:
+        bump_errors(self, body=body, error=str(exc))
+        log_vendor_failure(
+            self.tier,
+            settings.getleads_mcp_url,
+            status=status if status is not None else "mcp",
+            body=body,
+            error=str(exc),
+        )
+
+    def _invoke_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        tool: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Send a tools/call only when items is a non-empty array (or schema has no items)."""
+        if tool is None:
+            tool = self._tool_by_name(tool_name)
+        props = _schema_props(tool) if tool else {}
+        items_key = _find_prop(props, {"items", "rows", "records", "batch"}) if props else "items"
+        if items_key or "items" in arguments:
+            if not items_ready(arguments):
+                log.info("getleads skip %s: items must be a non-empty array", tool_name)
+                return None
+        if tool:
+            extra_ok = _input_schema(tool).get("additionalProperties", True)
+            payload = dict(arguments)
+            if extra_ok is False:
+                payload = {k: v for k, v in payload.items() if k in props}
+            if not arguments_valid(tool, payload):
+                log.info("getleads skip %s: mapped args fail live schema", tool_name)
+                return None
+        else:
+            payload = dict(arguments)
+            if not items_ready(payload) and "items" in payload:
+                return None
+        with self._stats_lock:
+            self.calls += 1
+        try:
+            return self._client().call_tool(tool_name, payload)
+        except McpError as exc:
+            self._record_call_error(
+                exc,
+                status=exc.status if exc.status is not None else "mcp",
+                body=exc.body or str(exc),
+            )
+            return None
+        except Exception as exc:
+            self._record_call_error(exc, status="transport", body=str(exc))
+            return None
+
     def _call(self, tool: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
         mapped = map_arguments(tool, arguments)
         if not arguments_valid(tool, mapped):
             return None
-        self.calls += 1
-        try:
-            return self._client().call_tool(_tool_name(tool), mapped)
-        except McpError as exc:
-            bump_errors(self)
-            log_vendor_failure(
-                self.tier,
-                settings.getleads_mcp_url,
-                status=exc.status if exc.status is not None else "mcp",
-                body=exc.body,
-                error=str(exc),
-            )
+        return self._invoke_tool(_tool_name(tool), mapped, tool)
+
+    def _hit_from_payload(self, data: dict[str, Any] | None) -> EmailHit | None:
+        if not data:
             return None
-        except Exception as exc:
-            bump_errors(self)
-            log_vendor_failure(
-                self.tier,
-                settings.getleads_mcp_url,
-                error=str(exc),
-            )
+        email, status = extract_email(data)
+        source = data
+        if not email:
+            records = unwrap_records(data)
+            if records:
+                source = _flatten_person(records[0])
+                email, status = extract_email(source)
+        if not email:
+            if any(
+                isinstance(rec, dict) and rec.get("success") is True
+                for rec in unwrap_records(data)
+            ):
+                self._note_success(email=False, charged=True)
             return None
+        phone = extract_phone(source)
+        if not phone:
+            phone = extract_phone(data)
+        self._note_success(email=True, charged=True)
+        return EmailHit(
+            email=email,
+            source_tier=self.tier,
+            status=status or "found",
+            phone=phone,
+            raw=data,
+        )
 
     def find_email(
         self,
@@ -684,50 +820,65 @@ class GetLeadsClient:
         assert_capability(CAP_EMAIL, vendor=self.tier, endpoint="mcp tools/call")
         if not self.enabled:
             return None
-        linkedin_url = (linkedin_url or "").strip()
-        values = {
-            "first_name": first_name,
-            "last_name": last_name,
-            "domain": domain,
-            "email_domain": domain,
-            "company_name": company_name or domain,
-            "linkedin_url": linkedin_url,
-        }
-        try:
-            tools = self.list_tools()
-        except Exception as exc:
-            bump_errors(self)
-            log_vendor_failure(self.tier, settings.getleads_mcp_url, error=str(exc))
-            return None
-        tool = pick_satisfiable_tool(tools, score_email_tool, values)
-        if not tool:
-            _log_gap_once(
-                "_MISSING_EMAIL_LOGGED",
-                "getleads has no tools/list entry covering find work email "
-                "(or row lacks fields the live schema requires, e.g. linkedin_url); skipping find_email",
-            )
-            return None
-        data = self._call(tool, values)
-        if not data:
-            return None
-        email, status = extract_email(data)
-        if not email:
-            records = unwrap_records(data)
-            if records:
-                email, status = extract_email(_flatten_person(records[0]))
-        if not email:
-            return None
-        phone = extract_phone(data)
-        if not phone and unwrap_records(data):
-            phone = extract_phone(_flatten_person(unwrap_records(data)[0]))
-        self.hits += 1
-        return EmailHit(
-            email=email,
-            source_tier=self.tier,
-            status=status or "found",
-            phone=phone,
-            raw=data,
+        tool_name, payload = route_email_lookup(
+            linkedin_url=linkedin_url,
+            first_name=first_name,
+            last_name=last_name,
+            domain=domain,
+            company_name=company_name,
         )
+        if not tool_name or not payload or not items_ready(payload):
+            return None
+        data = self._invoke_tool(tool_name, payload)
+        return self._hit_from_payload(data)
+
+    def find_email_bulk(self, rows: list[dict[str, Any]]) -> list[EmailHit | None]:
+        """LinkedIn rows one-at-a-time; name+company/domain in batches of 50."""
+        assert_capability(CAP_EMAIL, vendor=self.tier, endpoint="mcp tools/call")
+        out: list[EmailHit | None] = [None] * len(rows)
+        if not self.enabled or not rows:
+            return out
+        linkedin_idxs: list[int] = []
+        person_idxs: list[int] = []
+        person_items: list[dict[str, Any]] = []
+        for i, row in enumerate(rows):
+            tool_name, payload = route_email_lookup(
+                linkedin_url=str(row.get("linkedin_url") or ""),
+                first_name=str(row.get("first_name") or ""),
+                last_name=str(row.get("last_name") or ""),
+                domain=str(row.get("domain") or ""),
+                company_name=str(row.get("company_name") or ""),
+            )
+            if tool_name == LINKEDIN_EMAIL_TOOL:
+                linkedin_idxs.append(i)
+            elif tool_name == PERSON_ENRICH_TOOL and payload:
+                person_idxs.append(i)
+                person_items.append(payload["items"][0])
+        for i in linkedin_idxs:
+            out[i] = self.find_email(
+                str(rows[i].get("first_name") or ""),
+                str(rows[i].get("last_name") or ""),
+                str(rows[i].get("domain") or ""),
+                str(rows[i].get("company_name") or ""),
+                linkedin_url=str(rows[i].get("linkedin_url") or ""),
+            )
+        for start in range(0, len(person_items), PERSON_BATCH_MAX):
+            chunk_items = person_items[start : start + PERSON_BATCH_MAX]
+            chunk_idxs = person_idxs[start : start + PERSON_BATCH_MAX]
+            if not items_ready({"items": chunk_items}):
+                continue
+            data = self._invoke_tool(PERSON_ENRICH_TOOL, {"items": chunk_items})
+            if not data:
+                continue
+            records = unwrap_records(data)
+            for offset, idx in enumerate(chunk_idxs):
+                rec = records[offset] if offset < len(records) else None
+                if rec is None:
+                    continue
+                hit = self._hit_from_payload(_flatten_person(rec) if rec else None)
+                if hit:
+                    out[idx] = hit
+        return out
 
     def find_people(
         self,
@@ -743,7 +894,7 @@ class GetLeadsClient:
         try:
             tools = self.list_tools()
         except Exception as exc:
-            bump_errors(self)
+            bump_errors(self, error=str(exc))
             log_vendor_failure(self.tier, settings.getleads_mcp_url, error=str(exc))
             return []
         tool = pick_tool(tools, score_people_tool)
@@ -786,7 +937,7 @@ class GetLeadsClient:
         try:
             tools = self.list_tools()
         except Exception as exc:
-            bump_errors(self)
+            bump_errors(self, error=str(exc))
             log_vendor_failure(self.tier, settings.getleads_mcp_url, error=str(exc))
             return empty
         tool = pick_tool(tools, score_search_tool)

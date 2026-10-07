@@ -513,7 +513,7 @@ def test_aiark_email_from_linkedin_without_name(monkeypatch) -> None:
         write_supabase=True,
     )
     assert out["emails_found"] == 1
-    gl.find_email.assert_not_called()
+    gl.find_email.assert_called()
     ark.find_email.assert_called()
     lm.find_email.assert_not_called()
 
