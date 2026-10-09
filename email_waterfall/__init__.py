@@ -3,4 +3,4 @@
 from .waterfall import enrich_waterfall, Waterfall
 
 __all__ = ["enrich_waterfall", "Waterfall"]
-__version__ = "1.6.0"
+__version__ = "1.6.1"

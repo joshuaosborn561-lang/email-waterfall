@@ -273,8 +273,8 @@ def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]
         if first_err:
             wf.tier_stats[name]["first_error"] = str(first_err)[:300]
         charged = getattr(vendor, "credits_charged", None)
-        if charged is not None:
-            wf.tier_stats[name]["credits_charged"] = int(charged or 0)
+        if isinstance(charged, (int, float)):
+            wf.tier_stats[name]["credits_charged"] = float(charged)
         disabled_reason = getattr(wf, "_circuit_disabled", {}).get(name)
         if disabled_reason:
             wf.tier_stats[name]["disabled"] = True

@@ -105,6 +105,8 @@ AI Ark is fully used on all three lanes (not people-only):
 - email: LinkedIn URL, AI Ark person id, name+domain, or phone →
   `POST /v2/people/export/single`
 - cellphone: LinkedIn URL or name+domain → `POST /v2/people/mobile-phone-finder`
+  (5 credits on hit). People search is 0.5 cr on a result; email found is
+  1 cr. Misses are $0. Prospeo email is 1 cr on hit, mobile 10 cr.
 
 Cellphones fall through AI Ark → Prospeo → FullEnrich `contact.phones` if
 max_tier allows. Vendor-found numbers are Veriphone-checked (`phone_valid`
@@ -129,7 +131,8 @@ is passed. Phone is off unless `find_phone=true` or need is `both` / `phone`.
 need='email' / find_phone=false skips AI Ark mobile-phone-finder, Prospeo
 enrich_mobile, FullEnrich contact.phones, and Veriphone entirely — do not
 call and discard. Job results include `suppressed_by_need` counts and
-`estimate_only` quotes the email-only AI Ark rate (1.0, not 1.5).
+`estimate_only` quotes worst-case hit rates (AI Ark email-only is 1.5:
+people search + email). Recorded spend is actual billed credits (0 on miss).
 AI Ark People Search then export/single is one attempt and two vendor_calls.
 
 ## Input row shape

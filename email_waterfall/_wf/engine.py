@@ -10,9 +10,11 @@ from email_waterfall.need import (
     CAP_EMAIL,
     CAP_PEOPLE,
     CAP_PHONE,
+    PAY_ON_HIT,
     assert_capability,
     capabilities,
-    credit_per_row,
+    function_credits,
+    function_worst_credits,
     normalize_need,
     set_need,
 )
@@ -119,21 +121,27 @@ class Waterfall:
             self.tier_stats.setdefault(tier, _empty_stats())
             self.tier_stats[tier][field] = self.tier_stats[tier].get(field, 0) + 1
 
-    def _bump_attempt(self, tier: str, row: dict[str, Any]) -> bool:
-        """One attempt per row per tier. Extra HTTP is vendor_calls, not attempts.
+    def _bump_attempt(
+        self,
+        tier: str,
+        row: dict[str, Any],
+        *,
+        worst_credits: float | None = None,
+    ) -> bool:
+        """Gate a vendor call. Hit-priced tiers do not book spend here.
 
-        AI Ark name+domain email is People Search then export/single: 1 attempt,
-        2 vendor_calls. Email + phone on the same row is still 1 attempt.
-        Returns False when the cost ceiling would be exceeded (job stops).
+        AI Ark / Prospeo charge only on a hit; this checks the worst-case
+        next function against the ceiling. Other paid tiers still book the
+        attempt. Returns False when the job stops at the ceiling.
         """
         key = (tier, id(row))
-        credits = credit_per_row(
-            tier, self.need, CREDIT_PER_ATTEMPT.get(tier, 1.0), self.caps
-        )
-        cost = attempt_cost_usd(tier, credits=credits)
+        if worst_credits is None:
+            worst_credits = (
+                0.0 if tier in PAY_ON_HIT else CREDIT_PER_ATTEMPT.get(tier, 1.0)
+            )
+        cost = attempt_cost_usd(tier, credits=worst_credits)
+        book_now = tier not in PAY_ON_HIT
         with self._lock:
-            if key in self._row_attempts:
-                return True
             if self.stopped_at_ceiling:
                 return False
             if cost > 0 and self.spend_usd + cost > self.approve_cost_usd:
@@ -146,11 +154,39 @@ class Waterfall:
                     self.approve_cost_usd,
                 )
                 return False
-            self._row_attempts.add(key)
+            if key not in self._row_attempts:
+                self._row_attempts.add(key)
+                self.tier_stats.setdefault(tier, _empty_stats())
+                self.tier_stats[tier]["calls"] = self.tier_stats[tier].get("calls", 0) + 1
+                if book_now:
+                    self.spend_usd = round(self.spend_usd + cost, 6)
+            return True
+
+    def _book_actual(self, tier: str, credits: float) -> None:
+        """Record billed credits. Misses pass 0."""
+        if credits <= 0:
+            return
+        cost = attempt_cost_usd(tier, credits=credits)
+        with self._lock:
             self.spend_usd = round(self.spend_usd + cost, 6)
             self.tier_stats.setdefault(tier, _empty_stats())
-            self.tier_stats[tier]["calls"] = self.tier_stats[tier].get("calls", 0) + 1
-            return True
+            prev = float(self.tier_stats[tier].get("credits_charged") or 0)
+            self.tier_stats[tier]["credits_charged"] = round(prev + float(credits), 6)
+
+    def _book_vendor(
+        self,
+        client: Any,
+        tier: str,
+        *,
+        hit: Any,
+        function: str,
+    ) -> None:
+        last = getattr(client, "last_credits", None)
+        if isinstance(last, (int, float)):
+            self._book_actual(tier, float(last))
+            return
+        if hit:
+            self._book_actual(tier, function_credits(tier, function))
 
     def _suppress(self, key: str) -> None:
         with self._lock:
@@ -271,7 +307,9 @@ class Waterfall:
             and can_aiark
             and self.ai_ark.enabled
             and self._allowed("aiark")
-            and self._bump_attempt("aiark", row)
+            and self._bump_attempt(
+                "aiark", row, worst_credits=function_worst_credits("aiark", "email")
+            )
         ):
             before_e = _int_attr(self.ai_ark, "errors")
             hit = self.ai_ark.find_email(
@@ -284,6 +322,7 @@ class Waterfall:
                 person_id=person_id,
                 full_name=row.get("full_name") or "",
             )
+            self._book_vendor(self.ai_ark, "aiark", hit=hit, function="email")
             self._note_circuit("aiark", _int_attr(self.ai_ark, "errors") > before_e)
             if hit:
                 self._bump("aiark", "email_hits")
@@ -296,7 +335,11 @@ class Waterfall:
             and can_prospeo
             and self.prospeo.enabled
             and self._allowed("prospeo")
-            and self._bump_attempt("prospeo", row)
+            and self._bump_attempt(
+                "prospeo",
+                row,
+                worst_credits=function_worst_credits("prospeo", "email"),
+            )
         ):
             before_e = _int_attr(self.prospeo, "errors")
             hit = self.prospeo.find_email(
@@ -307,6 +350,7 @@ class Waterfall:
                 linkedin_url=linkedin,
                 full_name=row.get("full_name") or "",
             )
+            self._book_vendor(self.prospeo, "prospeo", hit=hit, function="email")
             self._note_circuit(
                 "prospeo", _int_attr(self.prospeo, "errors") > before_e
             )
@@ -408,7 +452,11 @@ class Waterfall:
         for tier, client in vendors:
             if not self._allowed(tier):
                 continue
-            if not self._bump_attempt(tier, row):
+            if not self._bump_attempt(
+                tier,
+                row,
+                worst_credits=function_worst_credits(tier, "people"),
+            ):
                 continue
             before_e = _int_attr(client, "errors")
             if domain:
@@ -424,6 +472,7 @@ class Waterfall:
                     titles=self.target_titles,
                     full_name=row.get("full_name") or "",
                 )
+            self._book_vendor(client, tier, hit=bool(people), function="people")
             self._note_circuit(tier, _int_attr(client, "errors") > before_e)
             picked = self._pick(people)
             if picked:
@@ -583,7 +632,15 @@ class Waterfall:
                 return self._phone_cache[cache_key]
 
         hit: PhoneHit | None = None
-        if eligible.get("aiark") and self._allowed("aiark") and self._bump_attempt("aiark", row):
+        if (
+            eligible.get("aiark")
+            and self._allowed("aiark")
+            and self._bump_attempt(
+                "aiark",
+                row,
+                worst_credits=function_worst_credits("aiark", "mobile"),
+            )
+        ):
             before_e = _int_attr(self.ai_ark, "errors")
             found = self.ai_ark.find_mobile(
                 first,
@@ -593,6 +650,7 @@ class Waterfall:
                 linkedin_url=linkedin,
                 full_name=full,
             )
+            self._book_vendor(self.ai_ark, "aiark", hit=found, function="mobile")
             self._note_circuit("aiark", _int_attr(self.ai_ark, "errors") > before_e)
             if found:
                 hit = self._accept_phone(
@@ -604,7 +662,16 @@ class Waterfall:
                 if hit:
                     self._bump("aiark", "phone_hits")
 
-        if not hit and eligible.get("prospeo") and self._allowed("prospeo") and self._bump_attempt("prospeo", row):
+        if (
+            not hit
+            and eligible.get("prospeo")
+            and self._allowed("prospeo")
+            and self._bump_attempt(
+                "prospeo",
+                row,
+                worst_credits=function_worst_credits("prospeo", "mobile"),
+            )
+        ):
             before_e = _int_attr(self.prospeo, "errors")
             found = self.prospeo.find_mobile(
                 first,
@@ -614,6 +681,7 @@ class Waterfall:
                 linkedin_url=linkedin,
                 full_name=full,
             )
+            self._book_vendor(self.prospeo, "prospeo", hit=found, function="mobile")
             self._note_circuit(
                 "prospeo", _int_attr(self.prospeo, "errors") > before_e
             )

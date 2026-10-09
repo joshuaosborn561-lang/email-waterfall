@@ -58,11 +58,33 @@ PHONE_VENDORS = ("aiark", "prospeo", "fullenrich")
 PHONE_ENDPOINTS = ("aiark", "prospeo", "fullenrich", "veriphone")
 PEOPLE_VENDORS = ("getleads", "aiark")
 
-# AI Ark 1.5 is the email+phone bundle used in estimate_only. Email-only is 1.0;
-# phone-only (mobile-phone-finder, no export/single) is 0.5.
+# Actual billed credits on a hit. Miss is 0. Estimates use worst-case (assume hit).
+# AI Ark: 0.5 people-search result, 1 email found, 5 mobile found.
+# Prospeo: 1 email found, 10 mobile found.
+AIARK_PEOPLE_CREDITS = 0.5
 AIARK_EMAIL_CREDITS = 1.0
-AIARK_PHONE_CREDITS = 0.5
-AIARK_BOTH_CREDITS = 1.5
+AIARK_MOBILE_CREDITS = 5.0
+PROSPEO_EMAIL_CREDITS = 1.0
+PROSPEO_MOBILE_CREDITS = 10.0
+
+FUNCTION_CREDITS: dict[str, dict[str, float]] = {
+    "aiark": {
+        "people": AIARK_PEOPLE_CREDITS,
+        "email": AIARK_EMAIL_CREDITS,
+        "mobile": AIARK_MOBILE_CREDITS,
+    },
+    "prospeo": {
+        "email": PROSPEO_EMAIL_CREDITS,
+        "mobile": PROSPEO_MOBILE_CREDITS,
+    },
+}
+PAY_ON_HIT = frozenset(FUNCTION_CREDITS)
+
+# Backward-compatible names used by estimate rate notes / older tests.
+AIARK_PHONE_CREDITS = AIARK_MOBILE_CREDITS
+AIARK_BOTH_CREDITS = (
+    AIARK_PEOPLE_CREDITS + AIARK_EMAIL_CREDITS + AIARK_MOBILE_CREDITS
+)
 
 _current_need: ContextVar[str] = ContextVar("enrich_need", default="both")
 _current_caps: ContextVar[frozenset[str]] = ContextVar(
@@ -202,23 +224,40 @@ def assert_capability(
     )
 
 
+def function_credits(tier: str, function: str) -> float:
+    """Published hit rate for one vendor function. 0 if unknown."""
+    return float((FUNCTION_CREDITS.get(tier) or {}).get(function) or 0.0)
+
+
+def function_worst_credits(tier: str, function: str) -> float:
+    """Worst-case credits for one call (assume hit). AI Ark email includes search."""
+    if tier == "aiark" and function == "email":
+        return AIARK_PEOPLE_CREDITS + AIARK_EMAIL_CREDITS
+    return function_credits(tier, function)
+
+
 def credit_per_row(
     tier: str,
     need: str,
     default: float = 1.0,
     caps: frozenset[str] | None = None,
 ) -> float:
-    """Per-row credit quote. AI Ark 1.5 is email+phone; need gates that."""
-    if tier != "aiark":
+    """Conservative per-row credit quote (assume every function hits)."""
+    rates = FUNCTION_CREDITS.get(tier)
+    if not rates:
         return default
     use = caps if caps is not None else capabilities(need)
-    want_email = CAP_EMAIL in use
-    want_phone = CAP_PHONE in use
-    if want_email and want_phone:
-        return AIARK_BOTH_CREDITS
-    if want_phone and not want_email:
-        return AIARK_PHONE_CREDITS
-    return AIARK_EMAIL_CREDITS
+    total = 0.0
+    if CAP_PEOPLE in use and "people" in rates:
+        total += rates["people"]
+    if CAP_EMAIL in use and "email" in rates:
+        total += rates["email"]
+        # Name+domain email still runs People Search when need has no people cap.
+        if tier == "aiark" and CAP_PEOPLE not in use:
+            total += rates["people"]
+    if CAP_PHONE in use and "mobile" in rates:
+        total += rates["mobile"]
+    return total
 
 
 def tier_serves_need(

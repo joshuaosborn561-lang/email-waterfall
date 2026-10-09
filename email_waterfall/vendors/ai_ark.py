@@ -17,7 +17,15 @@ from typing import Any
 
 from email_waterfall import http_client
 from email_waterfall.config import settings
-from email_waterfall.need import CAP_EMAIL, CAP_PEOPLE, CAP_PHONE, assert_capability
+from email_waterfall.need import (
+    AIARK_EMAIL_CREDITS,
+    AIARK_MOBILE_CREDITS,
+    AIARK_PEOPLE_CREDITS,
+    CAP_EMAIL,
+    CAP_PEOPLE,
+    CAP_PHONE,
+    assert_capability,
+)
 
 from .base import EmailHit, PersonHit, PhoneHit, split_name
 from .errors import record_response_failure
@@ -119,6 +127,17 @@ class AiArkClient:
         self.calls = 0
         self.hits = 0
         self.errors = 0
+        self.credits_charged = 0.0
+        self.last_credits = 0.0
+
+    def _reset_last(self) -> None:
+        self.last_credits = 0.0
+
+    def _charge(self, credits: float) -> None:
+        if credits <= 0:
+            return
+        self.credits_charged = round(self.credits_charged + credits, 6)
+        self.last_credits = round(self.last_credits + credits, 6)
 
     @property
     def enabled(self) -> bool:
@@ -243,6 +262,9 @@ class AiArkClient:
             return []
         if not (domain or full_name or linkedin_url or phone or company_name):
             return []
+        nested = capability != CAP_PEOPLE
+        if not nested:
+            self._reset_last()
         assert_capability(
             capability, vendor=self.tier, endpoint="POST /v1/people"
         )
@@ -306,6 +328,7 @@ class AiArkClient:
                 out.append(person)
         if out:
             self.hits += 1
+            self._charge(AIARK_PEOPLE_CREDITS)
         return out
 
     def _export_single(
@@ -330,6 +353,7 @@ class AiArkClient:
         if not email:
             return None
         self.hits += 1
+        self._charge(AIARK_EMAIL_CREDITS)
         return EmailHit(
             email=email,
             source_tier=self.tier,
@@ -353,6 +377,7 @@ class AiArkClient:
         """Work email from LinkedIn URL, AI Ark id, name+domain, and/or phone."""
         if not self.enabled:
             return None
+        self._reset_last()
         linkedin_url = (linkedin_url or "").strip()
         person_id = (person_id or "").strip()
         phone = (phone or "").strip()
@@ -387,6 +412,7 @@ class AiArkClient:
         for person in people:
             if person.email and "@" in person.email:
                 self.hits += 1
+                self._charge(AIARK_EMAIL_CREDITS)
                 return EmailHit(
                     email=person.email,
                     source_tier=self.tier,
@@ -415,6 +441,7 @@ class AiArkClient:
         """Cellphone via POST /v2/people/mobile-phone-finder (5 credits on hit)."""
         if not self.enabled:
             return None
+        self._reset_last()
         linkedin_url = (linkedin_url or "").strip()
         domain = (domain or "").strip()
         full = (full_name or f"{first_name} {last_name}".strip()).strip()
@@ -438,6 +465,7 @@ class AiArkClient:
         if not phone:
             return None
         self.hits += 1
+        self._charge(AIARK_MOBILE_CREDITS)
         return PhoneHit(
             phone=phone,
             source_tier=self.tier,

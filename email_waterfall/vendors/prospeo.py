@@ -11,10 +11,37 @@ from typing import Any
 
 from email_waterfall import http_client
 from email_waterfall.config import settings
-from email_waterfall.need import CAP_EMAIL, CAP_PHONE, assert_capability
+from email_waterfall.need import (
+    CAP_EMAIL,
+    CAP_PHONE,
+    PROSPEO_EMAIL_CREDITS,
+    PROSPEO_MOBILE_CREDITS,
+    assert_capability,
+)
 
 from .base import EmailHit, PhoneHit
 from .errors import record_response_failure
+
+PROSPEO_MISS_CODES = frozenset(
+    {
+        "NO_MATCH",
+        "NOT_FOUND",
+        "NO_RESULT",
+        "NO_EMAIL",
+        "NO_MOBILE",
+        "NO_DATA",
+    }
+)
+
+
+def _is_prospeo_miss(_status: int, body: Any) -> bool:
+    """NO_MATCH / empty reveal is a miss, not a vendor error."""
+    if not isinstance(body, dict):
+        return False
+    code = str(body.get("error_code") or body.get("code") or "").upper()
+    if code in PROSPEO_MISS_CODES:
+        return True
+    return False
 
 
 class ProspeoClient:
@@ -27,6 +54,17 @@ class ProspeoClient:
         self.calls = 0
         self.hits = 0
         self.errors = 0
+        self.credits_charged = 0.0
+        self.last_credits = 0.0
+
+    def _reset_last(self) -> None:
+        self.last_credits = 0.0
+
+    def _charge(self, credits: float) -> None:
+        if credits <= 0:
+            return
+        self.credits_charged = round(self.credits_charged + credits, 6)
+        self.last_credits = round(self.last_credits + credits, 6)
 
     @property
     def enabled(self) -> bool:
@@ -78,6 +116,7 @@ class ProspeoClient:
         if not has_linkedin and not has_name_company:
             return None
 
+        self._reset_last()
         assert_capability(
             CAP_EMAIL, vendor=self.tier, endpoint="POST /enrich-person"
         )
@@ -105,6 +144,8 @@ class ProspeoClient:
 
         if not isinstance(body, dict):
             return None
+        if _is_prospeo_miss(r.status_code, body):
+            return None
         if r.status_code >= 400 or body.get("error") is True:
             record_response_failure(self, url, r)
             return None
@@ -118,6 +159,7 @@ class ProspeoClient:
         if status.upper() in {"INVALID", "NOT_FOUND"}:
             return None
         self.hits += 1
+        self._charge(PROSPEO_EMAIL_CREDITS)
         return EmailHit(
             email=email,
             source_tier=self.tier,
@@ -165,6 +207,7 @@ class ProspeoClient:
         if not has_linkedin and not has_name_company:
             return None
 
+        self._reset_last()
         assert_capability(
             CAP_PHONE, vendor=self.tier, endpoint="POST /enrich-person enrich_mobile"
         )
@@ -191,6 +234,8 @@ class ProspeoClient:
             return None
         if not isinstance(body, dict):
             return None
+        if _is_prospeo_miss(r.status_code, body):
+            return None
         if r.status_code >= 400 or body.get("error") is True:
             record_response_failure(self, url, r)
             return None
@@ -210,4 +255,5 @@ class ProspeoClient:
         if not mobile or len(digits) < 7:
             return None
         self.hits += 1
+        self._charge(PROSPEO_MOBILE_CREDITS)
         return PhoneHit(phone=mobile, source_tier=self.tier, raw=body)

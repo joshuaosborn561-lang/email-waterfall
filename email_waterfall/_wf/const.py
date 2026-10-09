@@ -32,6 +32,8 @@ from urllib.parse import urlsplit
 
 from email_waterfall.clients import ClientConfig
 from email_waterfall.need import (
+    CAP_EMAIL,
+    CAP_PHONE,
     credit_per_row,
     estimate_suppressed,
     resolve_need,
@@ -62,11 +64,12 @@ NAME_COMPANY_TIERS: tuple[str, ...] = (
 )
 CIRCUIT_WINDOW = 25
 CIRCUIT_ERROR_LIMIT = 20
+# Fallback / non-hit-priced tiers. AI Ark + Prospeo book per function on hit.
 CREDIT_PER_ATTEMPT: dict[str, float] = {
     "getleads": 1.0,
     "smartlead": 1.0,
-    "aiark": 1.5,
-    "prospeo": 1.0,
+    "aiark": 6.5,
+    "prospeo": 11.0,
     "fullenrich": 1.0,
 }
 
@@ -482,10 +485,12 @@ def estimate_waterfall(
             "credits_available": None,
         }
         if tier == "aiark":
+            want_email = CAP_EMAIL in need_caps
+            want_phone = CAP_PHONE in need_caps
             row["rate_note"] = (
                 "email+phone"
-                if per_row == 1.5
-                else ("phone-only" if per_row == 0.5 else "email-only")
+                if want_email and want_phone
+                else ("phone-only" if want_phone and not want_email else "email-only")
             )
         if tier == "smartlead":
             row["credits_available"] = sl_snap.get("available")

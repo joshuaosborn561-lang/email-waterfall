@@ -82,6 +82,8 @@ def test_find_email_uses_linkedin_export_single(monkeypatch) -> None:
     assert hit.source_tier == "aiark"
     assert posts[0][0] == "/v2/people/export/single"
     assert posts[0][1]["url"] == "https://www.linkedin.com/in/pat-lee"
+    assert client.credits_charged == 1.0
+    assert client.last_credits == 1.0
 
 
 def test_find_email_name_domain_searches_then_exports(monkeypatch) -> None:
@@ -114,6 +116,29 @@ def test_find_email_name_domain_searches_then_exports(monkeypatch) -> None:
     hit = client.find_email("Pat", "Lee", "paragonhonda.com")
     assert hit is not None
     assert hit.email == "pat@paragonhonda.com"
+    assert client.credits_charged == 1.5
+    assert client.last_credits == 1.5
+
+
+def test_find_email_search_hit_export_miss_charges_people_only(monkeypatch) -> None:
+    client = AiArkClient(api_key="tok")
+
+    def fake_post(path, body):
+        if path.endswith("/v1/people"):
+            return 200, {
+                "content": [
+                    {
+                        "id": "person-9",
+                        "profile": {"first_name": "Pat", "last_name": "Lee"},
+                    }
+                ]
+            }
+        return 200, {"status": 404, "data": None}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    assert client.find_email("Pat", "Lee", "paragonhonda.com") is None
+    assert client.credits_charged == 0.5
+    assert client.last_credits == 0.5
 
 
 def test_find_email_phone_can_search(monkeypatch) -> None:
@@ -166,6 +191,8 @@ def test_find_people_sends_ranked_titles(monkeypatch) -> None:
     )
     assert len(people) == 1
     assert people[0].title == "Service Director"
+    assert client.credits_charged == 0.5
+    assert client.last_credits == 0.5
 
 
 def test_find_mobile_linkedin(monkeypatch) -> None:
@@ -192,6 +219,8 @@ def test_find_mobile_linkedin(monkeypatch) -> None:
     assert hit is not None
     assert hit.phone == "+12015550100"
     assert hit.source_tier == "aiark"
+    assert client.credits_charged == 5.0
+    assert client.last_credits == 5.0
 
 
 def test_find_mobile_name_domain(monkeypatch) -> None:
@@ -218,6 +247,8 @@ def test_find_mobile_miss_is_none(monkeypatch) -> None:
 
     monkeypatch.setattr(client, "_post", fake_post)
     assert client.find_mobile("Jane", "Smith", "roofco.com") is None
+    assert client.credits_charged == 0
+    assert client.last_credits == 0
 
 
 def test_credits_reads_payments_balance(monkeypatch) -> None:
