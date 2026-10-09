@@ -8,7 +8,6 @@ from email_waterfall import waterfall
 from email_waterfall.need import NeedViolation, using_need
 from email_waterfall.vendors.ai_ark import AiArkClient
 from email_waterfall.vendors.base import EmailHit, PersonHit, PhoneHit
-from email_waterfall.vendors.leadmagic import LeadMagicClient
 from tests.test_waterfall import _patch_clients, _patch_writes, _vendor
 
 
@@ -50,19 +49,18 @@ def test_need_email_does_not_call_phone_finders(monkeypatch) -> None:
         ],
         client_tag="peterson",
         need="email",
-        max_tier="leadmagic",
+        max_tier="aiark",
         write_supabase=True,
     )
     assert out["need"] == "email"
     assert out["emails_found"] == 1
     assert out["phones_found"] == 0
     assert out["tier_breakdown"]["aiark"]["phone_hits"] == 0
-    assert out["tier_breakdown"]["leadmagic"]["phone_hits"] == 0
+    assert "leadmagic" not in out["tier_breakdown"]
     assert out["suppressed_by_need"]["aiark_phone"] == 1
-    assert out["suppressed_by_need"]["leadmagic_phone"] == 1
+    assert "leadmagic_phone" not in out["suppressed_by_need"]
     ark.find_email.assert_called()
     ark.find_mobile.assert_not_called()
-    lm.find_mobile.assert_not_called()
     assert not sink["contacts"][0].get("cellphone")
 
 
@@ -135,7 +133,6 @@ def test_need_dm_does_not_call_phone_or_email_finders(monkeypatch) -> None:
     gl.find_email.assert_not_called()
     ark.find_email.assert_not_called()
     ark.find_mobile.assert_not_called()
-    lm.find_mobile.assert_not_called()
 
 
 def test_aiark_find_mobile_raises_when_need_is_email() -> None:
@@ -143,13 +140,6 @@ def test_aiark_find_mobile_raises_when_need_is_email() -> None:
     with using_need("email"):
         with pytest.raises(NeedViolation, match="mobile-phone-finder"):
             client.find_mobile("Jane", "Smith", "roofco.com")
-
-
-def test_leadmagic_find_mobile_raises_when_need_is_email() -> None:
-    client = LeadMagicClient(api_key="lm")
-    with using_need("email"):
-        with pytest.raises(NeedViolation, match="mobile-finder"):
-            client.find_mobile(work_email="jane@roofco.com")
 
 
 def test_aiark_search_then_export_is_one_attempt(monkeypatch) -> None:
@@ -183,7 +173,6 @@ def test_aiark_search_then_export_is_one_attempt(monkeypatch) -> None:
         ai_ark=client,
         getleads=disabled,
         smartlead=disabled,
-        leadmagic=disabled,
         prospeo=disabled,
         fullenrich=disabled,
         need="both",
@@ -259,7 +248,6 @@ def test_need_people_email_domain_only_no_phone_calls(monkeypatch) -> None:
     assert sink["contacts"][0].get("email") == "jane@roofco.com"
     assert not sink["contacts"][0].get("cellphone")
     ark.find_mobile.assert_not_called()
-    lm.find_mobile.assert_not_called()
     for stats in out["tier_stats"].values():
         assert stats.get("phone_hits", 0) == 0
 

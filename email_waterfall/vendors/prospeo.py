@@ -1,4 +1,4 @@
-"""Prospeo — email tier between LeadMagic and FullEnrich.
+"""Prospeo — email tier between AI Ark and FullEnrich.
 
 POST https://api.prospeo.io/enrich-person
 Auth: X-KEY
@@ -135,7 +135,7 @@ class ProspeoClient:
         linkedin_url: str = "",
         full_name: str = "",
     ) -> PhoneHit | None:
-        """Cellphone via enrich-person with enrich_mobile=True (later than LeadMagic)."""
+        """Cellphone via enrich-person with enrich_mobile=True (after AI Ark)."""
         if not self.enabled:
             return None
         data: dict[str, str] = {}

@@ -10,15 +10,19 @@ from email_waterfall.concurrency import company_concurrency
 from email_waterfall.need import CAP_EMAIL, CAP_PHONE, allows, resolve_need, using_need
 
 from email_waterfall._wf.const import (
+    DEFAULT_APPROVE_COST_USD,
     DEFAULT_MAX_TIER,
     Need,
+    STATUS_REFUSED_OVER_CEILING,
     _fill_row_domain,
     _has_inline_rows,
     _norm_row,
     _parse_rows,
     classify_rows,
     estimate_waterfall,
-    normalize_max_tier,
+    resolve_approve_cost_usd,
+    resolve_max_tier,
+    resolve_skip_tiers,
 )
 from email_waterfall._wf.engine import Waterfall
 from email_waterfall._wf.row import (
@@ -62,51 +66,60 @@ def _enrich_waterfall_serial(
         enriched.append(item)
 
     if pending_fe and wf.fullenrich.enabled and wf._allowed("fullenrich"):
-        fe_rows = [
-            {
-                "first_name": r["first_name"],
-                "last_name": r["last_name"],
-                "domain": r["domain"],
-                "company_name": r.get("company_name") or "",
-            }
-            for _, r in pending_fe
-        ]
+        hits: list = []
         with using_need(need_norm, getattr(wf, "caps", None)):
-            for _, r in pending_fe:
-                wf._bump_attempt("fullenrich", r)
-            hits = wf.fullenrich.find_email_bulk(fe_rows)
-            for (idx, _row), hit in zip(pending_fe, hits):
-                if hit:
-                    wf._bump("fullenrich", "email_hits")
-                    enriched[idx]["email"] = hit.email
-                    enriched[idx]["email_tier"] = hit.source_tier
-                    _fill_row_domain(enriched[idx]["row"], email=hit.email, raw=hit.raw)
-                    extra_phone = getattr(hit, "phone", "") or ""
-                    if allows(need_norm, CAP_PHONE) and extra_phone and not enriched[idx].get("phone"):
-                        accepted = wf._accept_phone(
-                            extra_phone, source_tier="fullenrich", raw=hit.raw
-                        )
-                        if accepted:
-                            enriched[idx]["phone"] = accepted.phone
-                            enriched[idx]["phone_tier"] = accepted.source_tier
-                            enriched[idx]["row"]["phone"] = accepted.phone
-                            wf._bump("fullenrich", "phone_hits")
-                    if allows(need_norm, CAP_PHONE) and not enriched[idx].get("phone"):
-                        phone_hit = wf.resolve_phone(
-                            enriched[idx]["row"], email=hit.email
-                        )
-                        if phone_hit:
-                            enriched[idx]["phone"] = phone_hit.phone
-                            enriched[idx]["phone_tier"] = phone_hit.source_tier
-                            raw_vp = (phone_hit.raw or {}).get("veriphone") or {}
-                            if isinstance(raw_vp, dict) and raw_vp.get("phone_type"):
-                                enriched[idx]["phone_type"] = raw_vp["phone_type"]
-                            if not enriched[idx]["row"].get("phone"):
-                                enriched[idx]["row"]["phone"] = phone_hit.phone
-                    elif not allows(need_norm, CAP_PHONE):
-                        wf.record_phone_skips(
-                            enriched[idx]["row"], email=hit.email
-                        )
+            reserved = []
+            for idx, r in pending_fe:
+                if wf._bump_attempt("fullenrich", r):
+                    reserved.append((idx, r))
+            pending_fe = reserved
+            if pending_fe:
+                fe_rows = [
+                    {
+                        "first_name": r["first_name"],
+                        "last_name": r["last_name"],
+                        "domain": r["domain"],
+                        "company_name": r.get("company_name") or "",
+                    }
+                    for _, r in pending_fe
+                ]
+                hits = wf.fullenrich.find_email_bulk(fe_rows)
+        for (idx, _row), hit in zip(pending_fe, hits):
+            if not hit:
+                continue
+            wf._bump("fullenrich", "email_hits")
+            enriched[idx]["email"] = hit.email
+            enriched[idx]["email_tier"] = hit.source_tier
+            _fill_row_domain(enriched[idx]["row"], email=hit.email, raw=hit.raw)
+            extra_phone = getattr(hit, "phone", "") or ""
+            if allows(need_norm, CAP_PHONE) and extra_phone and not enriched[idx].get("phone"):
+                accepted = wf._accept_phone(
+                    extra_phone,
+                    source_tier="fullenrich",
+                    raw=hit.raw,
+                    require_verify=True,
+                )
+                if accepted:
+                    enriched[idx]["phone"] = accepted.phone
+                    enriched[idx]["phone_tier"] = accepted.source_tier
+                    enriched[idx]["row"]["phone"] = accepted.phone
+                    wf._bump("fullenrich", "phone_hits")
+            if allows(need_norm, CAP_PHONE) and not enriched[idx].get("phone"):
+                phone_hit = wf.resolve_phone(
+                    enriched[idx]["row"], email=hit.email
+                )
+                if phone_hit:
+                    enriched[idx]["phone"] = phone_hit.phone
+                    enriched[idx]["phone_tier"] = phone_hit.source_tier
+                    raw_vp = (phone_hit.raw or {}).get("veriphone") or {}
+                    if isinstance(raw_vp, dict) and raw_vp.get("phone_type"):
+                        enriched[idx]["phone_type"] = raw_vp["phone_type"]
+                    if not enriched[idx]["row"].get("phone"):
+                        enriched[idx]["row"]["phone"] = phone_hit.phone
+            elif not allows(need_norm, CAP_PHONE):
+                wf.record_phone_skips(
+                    enriched[idx]["row"], email=hit.email
+                )
     elif pending_fe:
         wf.tier_stats["fullenrich"]["blocked_by_max_tier"] = len(pending_fe)
 
@@ -283,12 +296,17 @@ def enrich_waterfall(
     find_people: bool | None = None,
     find_email: bool | None = None,
     find_phone: bool | None = None,
+    skip_tiers: Any = None,
+    approve_cost_usd: float | int | str | None = None,
 ) -> dict[str, Any]:
     """Walk paid vendors per row; upsert isolated client tables; return counts.
 
     verify_only=True checks existing phone numbers with Veriphone and writes
     wf_phone / wf_phone_type (and contacts.line_type). Finder HTTP is skipped.
     find_people / find_email / find_phone override need when any is passed.
+    approve_cost_usd is a hard USD ceiling (default $5). The job estimates
+    first and refuses when the quote exceeds the ceiling; running spend that
+    would exceed it stops with status=stopped_at_ceiling.
     """
     from email_waterfall import waterfall as host
 
@@ -296,7 +314,12 @@ def enrich_waterfall(
         client_tag,
         write_supabase=bool(write_supabase) and not estimate_only,
     )
-    max_tier_n = normalize_max_tier(max_tier)
+    max_tier_n, deprecated_max, max_notes = resolve_max_tier(max_tier)
+    skip, deprecated_skip, skip_notes = resolve_skip_tiers(skip_tiers)
+    control_warnings = max_notes + skip_notes
+    ceiling = resolve_approve_cost_usd(
+        approve_cost_usd, default=DEFAULT_APPROVE_COST_USD
+    )
     need_norm, need_caps = resolve_need(
         need,
         find_people=find_people,
@@ -333,15 +356,35 @@ def enrich_waterfall(
         raw_rows = _parse_rows(rows)
 
     parsed = [_norm_row(r) for r in raw_rows]
+    quote = estimate_waterfall(
+        parsed,
+        max_tier=max_tier_n,
+        need=need_norm,
+        client=client,
+        verify_only=bool(verify_only),
+        caps=need_caps,
+        skip_tiers=skip,
+        approve_cost_usd=ceiling,
+        warnings=control_warnings,
+        deprecated_max_tier=deprecated_max,
+        deprecated_tiers=deprecated_skip,
+    )
     if estimate_only:
-        return estimate_waterfall(
-            parsed,
-            max_tier=max_tier_n,
-            need=need_norm,
-            client=client,
-            verify_only=bool(verify_only),
-            caps=need_caps,
+        return quote
+    estimated_usd = float(quote.get("estimated_cost_usd") or 0.0)
+    if estimated_usd > ceiling:
+        refused = dict(quote)
+        refused["ok"] = False
+        refused["estimate_only"] = False
+        refused["status"] = STATUS_REFUSED_OVER_CEILING
+        refused["approve_cost_usd"] = ceiling
+        refused["estimated_cost_usd"] = estimated_usd
+        refused["spend"] = 0
+        refused["reason"] = (
+            f"estimated_cost_usd={estimated_usd} exceeds "
+            f"approve_cost_usd={ceiling}"
         )
+        return refused
     if verify_only:
         parsed = [
             r
@@ -365,6 +408,7 @@ def enrich_waterfall(
             "need_capabilities": sorted(need_caps),
             "suppressed_by_need": {},
             "max_tier": max_tier_n,
+            "skip_tiers": sorted(skip),
             "client_tag": client.tag,
             "companies_table": client.companies_table,
             "contacts_table": client.contacts_table,
@@ -372,6 +416,11 @@ def enrich_waterfall(
             "require_title_match": bool(require_title_match),
             "modes": classify_rows([]),
             "verify_only": bool(verify_only),
+            "approve_cost_usd": ceiling,
+            "spend": 0,
+            "estimated_cost_usd": 0.0,
+            "status": "completed",
+            "warnings": control_warnings,
         }
 
     if table_src and table_src.writeback:
@@ -385,8 +434,14 @@ def enrich_waterfall(
         need=need_norm,
         verify_only=bool(verify_only),
         caps=need_caps,
+        skip_tiers=skip,
+        approve_cost_usd=ceiling,
     )
     wf.modes = classify_rows(parsed)
+    wf.control_warnings = control_warnings
+    wf.deprecated_max_tier = deprecated_max
+    wf.deprecated_tiers = deprecated_skip
+    wf.estimated_cost_usd = estimated_usd
 
     runner = _enrich_waterfall_parallel if parallel else _enrich_waterfall_serial
     return runner(

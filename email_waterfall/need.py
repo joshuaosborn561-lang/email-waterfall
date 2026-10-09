@@ -6,9 +6,9 @@ spend credits.
 
 Capabilities:
   email   — work-email finders (getleads, Smartlead, AI Ark export/single, …)
-  phone   — mobile/cellphone finders (AI Ark mobile-phone-finder, LeadMagic
-            mobile-finder, Prospeo enrich_mobile, FullEnrich contact.phones)
-            plus Veriphone /v2/verify so only phone_type=mobile is written
+  phone   — mobile/cellphone finders (AI Ark mobile-phone-finder, Prospeo
+            enrich_mobile, FullEnrich contact.phones) plus Veriphone
+            /v2/verify so only phone_valid + phone_type=mobile is written
   people  — decision-maker / people search (not an email finder)
 
 need='email'         → email only
@@ -51,13 +51,12 @@ EMAIL_VENDORS = (
     "getleads",
     "smartlead",
     "aiark",
-    "leadmagic",
     "prospeo",
     "fullenrich",
 )
-PHONE_VENDORS = ("aiark", "leadmagic", "prospeo", "fullenrich")
-PHONE_ENDPOINTS = ("aiark", "leadmagic", "prospeo", "fullenrich", "veriphone")
-PEOPLE_VENDORS = ("getleads", "aiark", "leadmagic")
+PHONE_VENDORS = ("aiark", "prospeo", "fullenrich")
+PHONE_ENDPOINTS = ("aiark", "prospeo", "fullenrich", "veriphone")
+PEOPLE_VENDORS = ("getleads", "aiark")
 
 # AI Ark 1.5 is the email+phone bundle used in estimate_only. Email-only is 1.0;
 # phone-only (mobile-phone-finder, no export/single) is 0.5.

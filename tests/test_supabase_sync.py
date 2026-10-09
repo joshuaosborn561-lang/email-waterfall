@@ -7,6 +7,7 @@ from email_waterfall.supabase_sync import (
     company_row,
     contact_row,
     dedupe_companies,
+    dedupe_contacts_by_person,
     dedupe_contacts_with_email,
     upsert_contacts,
 )
@@ -19,7 +20,7 @@ def test_dedupe_companies_by_domain() -> None:
             client_tag="basco",
             domain="PARAGONHONDA.COM",
             company_name="Paragon Honda",
-            dm_source_tier="leadmagic",
+            dm_source_tier="prospeo",
             dm_lookup_status="found",
         ),
         company_row(client_tag="basco", domain="other.com", company_name="Other"),
@@ -30,7 +31,7 @@ def test_dedupe_companies_by_domain() -> None:
     para = out[0]
     assert para["company_name"] == "Paragon Honda"
     assert para["dm_lookup_status"] == "found"
-    assert para["dm_source_tier"] == "leadmagic"
+    assert para["dm_source_tier"] == "prospeo"
 
 
 def test_dedupe_keeps_found_status() -> None:
@@ -119,6 +120,43 @@ def test_upsert_contacts_merges_existing_email_rows(monkeypatch) -> None:
         ],
     )
     assert written == 1
-    assert "on_conflict=domain,email" in calls[0][1]
+    assert "on_conflict=client_tag,domain,first_name_key,last_name_key" in calls[0][1]
     assert "merge-duplicates" in calls[0][2]
     assert "ignore-duplicates" not in calls[0][2]
+
+
+def test_contact_row_includes_person_key() -> None:
+    row = contact_row(
+        client_tag="peterson",
+        domain="roofco.com",
+        first_name="Jane",
+        last_name="Smith",
+    )
+    assert row["first_name_key"] == "jane"
+    assert row["last_name_key"] == "smith"
+
+
+def test_null_email_upsert_is_idempotent(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    def fake_request(method, path, **kwargs):
+        calls.append((method, path, kwargs.get("body")))
+        return 200, ""
+
+    monkeypatch.setattr("email_waterfall.supabase_sync._request", fake_request)
+    row = contact_row(
+        client_tag="goliath",
+        domain="acme.com",
+        first_name="Pat",
+        last_name="Lee",
+        email="",
+    )
+    first = upsert_contacts(CLIENTS["goliath"], [row])
+    second = upsert_contacts(CLIENTS["goliath"], [row])
+    assert first == 1
+    assert second == 1
+    assert all(
+        "on_conflict=client_tag,domain,first_name_key,last_name_key" in c[1]
+        for c in calls
+    )
+    assert dedupe_contacts_by_person([row, row]) == [row]

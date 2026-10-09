@@ -15,6 +15,8 @@ from email_waterfall.need import (
 from email_waterfall.vendors.base import PersonHit, PhoneHit
 
 from email_waterfall._wf.const import (
+    STATUS_COMPLETED,
+    STATUS_STOPPED_AT_CEILING,
     TIER_RANK,
     classify_rows,
     _fill_row_domain,
@@ -260,7 +262,6 @@ def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]
         ("getleads", wf.getleads),
         ("smartlead", wf.smartlead),
         ("aiark", wf.ai_ark),
-        ("leadmagic", wf.leadmagic),
         ("prospeo", wf.prospeo),
         ("fullenrich", wf.fullenrich),
         ("veriphone", wf.veriphone),
@@ -288,7 +289,11 @@ def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]
 
     tier_breakdown: dict[str, dict[str, Any]] = {}
     for tier_name, stats in wf.tier_stats.items():
-        allowed = tier_allowed(tier_name, max_tier_n) if tier_name in TIER_RANK else True
+        allowed = (
+            tier_allowed(tier_name, max_tier_n, getattr(wf, "skip_tiers", None))
+            if tier_name in TIER_RANK
+            else True
+        )
         row = {
             "attempts": int(stats.get("calls") or 0),
             "email_hits": int(stats.get("email_hits") or 0),
@@ -354,26 +359,44 @@ def _result_payload(
         "modes": getattr(wf, "modes", None) or classify_rows([]),
         "tier_stats": dict(wf.tier_stats),
         "tier_breakdown": tier_breakdown,
-        "warnings": warnings,
+        "warnings": warnings + list(getattr(wf, "control_warnings", []) or []),
         "need": need_norm,
         "need_capabilities": sorted(getattr(wf, "caps", None) or capabilities(need_norm)),
         "suppressed_by_need": dict(getattr(wf, "suppressed_by_need", {}) or {}),
         "max_tier": max_tier_n,
+        "skip_tiers": sorted(getattr(wf, "skip_tiers", set()) or []),
         "client_tag": client.tag,
         "companies_table": client.companies_table,
         "contacts_table": client.contacts_table,
         "target_titles": titles,
         "require_title_match": bool(require_title_match),
+        "approve_cost_usd": getattr(wf, "approve_cost_usd", None),
+        "spend": float(getattr(wf, "spend_usd", 0.0) or 0.0),
+        "status": (
+            STATUS_STOPPED_AT_CEILING
+            if getattr(wf, "stopped_at_ceiling", False)
+            else STATUS_COMPLETED
+        ),
         "vendors_enabled": {
-            "getleads": wf.getleads.enabled and wf._allowed("getleads"),
-            "smartlead": wf.smartlead.enabled and wf._allowed("smartlead"),
-            "aiark": wf.ai_ark.enabled and wf._allowed("aiark"),
-            "leadmagic": wf.leadmagic.enabled and wf._allowed("leadmagic"),
-            "prospeo": wf.prospeo.enabled and wf._allowed("prospeo"),
-            "fullenrich": wf.fullenrich.enabled and wf._allowed("fullenrich"),
+            "getleads": wf.getleads.enabled
+            and tier_allowed("getleads", max_tier_n, getattr(wf, "skip_tiers", None)),
+            "smartlead": wf.smartlead.enabled
+            and tier_allowed("smartlead", max_tier_n, getattr(wf, "skip_tiers", None)),
+            "aiark": wf.ai_ark.enabled
+            and tier_allowed("aiark", max_tier_n, getattr(wf, "skip_tiers", None)),
+            "prospeo": wf.prospeo.enabled
+            and tier_allowed("prospeo", max_tier_n, getattr(wf, "skip_tiers", None)),
+            "fullenrich": wf.fullenrich.enabled
+            and tier_allowed("fullenrich", max_tier_n, getattr(wf, "skip_tiers", None)),
             "veriphone": bool(wf.veriphone.enabled),
         },
     }
+    if getattr(wf, "deprecated_max_tier", None):
+        out["deprecated_max_tier"] = wf.deprecated_max_tier
+    if getattr(wf, "deprecated_tiers", None):
+        out["deprecated_tiers"] = list(wf.deprecated_tiers)
+    if getattr(wf, "estimated_cost_usd", None) is not None:
+        out["estimated_cost_usd"] = wf.estimated_cost_usd
     if companies_done is not None:
         out["companies_done"] = companies_done
     if companies_total is not None:

@@ -23,7 +23,7 @@ Peterson / default owner titles: Owner, Founder, Principal, President, Partner, 
 ## Waterfall
 
 ```
-getleads → Smartlead → AI Ark → LeadMagic → Prospeo → FullEnrich
+getleads → Smartlead → AI Ark → Prospeo → FullEnrich
 ```
 
 **getleads** is first. The MCP at `https://app.getleads.io/api/mcp` accepts `GETLEADS_API_KEY` as a Bearer token. OAuth refresh tokens also work (`python scripts/getleads_auth.py`; rotating token in `public.ew_vendor_oauth_tokens`). Discovery (geography + industry + seniority + headcount) goes through the MCP tool `getleads_search`, which maps onto whatever people/lead-search tool `tools/list` actually exposes. `find_email` / `find_people` in the waterfall use the same live catalog — they return nothing (and log once) if no matching tool exists. Non-2xx and `isError` increment `tier_stats.*.errors` and never look like a quiet miss.
@@ -36,13 +36,15 @@ AI Ark is next on **people, email, and cellphone** (not people-only):
 - Email: LinkedIn URL, AI Ark person id, name + domain, and/or phone → `POST /v2/people/export/single`
 - Cellphone: LinkedIn URL or name + domain → `POST /v2/people/mobile-phone-finder` (5 credits on hit)
 
-LeadMagic mobile-finder runs after AI Ark when a LinkedIn URL or work email is available. Prospeo `enrich_mobile` only runs if `max_tier` is raised to `prospeo` or `fullenrich`. FullEnrich is last-tier **email and cellphone** (`contact.work_emails` and `contact.phones`; skip `LANDLINE`).
+Mobile order is **AI Ark → Prospeo → FullEnrich**. Vendor-found numbers are checked with Veriphone `GET /v2/verify` before they are accepted (`phone_valid` and `phone_type=mobile`). Landline / voip / invalid are dropped and the next finder is tried. FullEnrich is last-tier **email and cellphone** (`contact.work_emails` and `contact.phones`; skip `LANDLINE`).
 
-On `need='phone'` only, every candidate number (input or vendor) is checked with Veriphone `GET /v2/verify`. A number is written as cellphone only when `phone_valid` is true and `phone_type` is `mobile`. Landline / voip / invalid are dropped and the next finder is tried. The number and Veriphone `phone_type` are written back to the source table as `wf_phone` / `wf_phone_type` and to `{client}_*contacts.line_type`. Existing contact rows are **updated** on `(domain, email)`, not skipped. Set `VERIPHONE_API_KEY`. `need='both'` and `need='email'` skip Veriphone unless `verify_only=true`.
+On `need='phone'` (or `verify_only`), input numbers are also Veriphone-checked. The number and Veriphone `phone_type` are written back to the source table as `wf_phone` / `wf_phone_type` and to `{client}_*contacts.line_type`. Existing contact rows **upsert** on `(client_tag, domain, first_name_key, last_name_key)` so a re-run does not duplicate a null-email person. Set `VERIPHONE_API_KEY`.
 
-`verify_only=true` checks numbers already on the row with Veriphone and writes the verdict. Finder HTTP is skipped — use it to classify numbers you already have without paying AI Ark / LeadMagic again.
+`verify_only=true` checks numbers already on the row with Veriphone and writes the verdict. Finder HTTP is skipped — use it to classify numbers you already have without paying later paid finders again.
 
-`max_tier` default is `leadmagic` (alias `lm`). Raise it to `prospeo` / `fullenrich` (alias `fe`) if you want later paid email tiers.
+`max_tier` default is `prospeo`. Raise it to `fullenrich` (alias `fe`) for the last paid email/phone tier. Legacy LeadMagic names (`leadmagic`, `lm`, `lead_magic`) are accepted as a warning and map to the old AI Ark ceiling (stop before Prospeo). `skip_tiers` treats those names as no-ops.
+
+`approve_cost_usd` defaults to **$5** on `enrich_waterfall` and **$0.25** on `enrich_person` / `POST /enrich-one`. The job estimates first and refuses when the quote exceeds the ceiling (`status=refused_over_ceiling`). A run that would go over mid-job stops with `status=stopped_at_ceiling`. Pass a higher number to raise the cap.
 
 `need` gates **vendor calls**, not just output. It is independent of `max_tier`:
 
@@ -53,11 +55,11 @@ On `need='phone'` only, every candidate number (input or vendor) is checked with
 | `dm` | people-discovery only | phone and email finders |
 | `both` | email + phone + people | — |
 
-`need='email'` never calls AI Ark `mobile-phone-finder` or LeadMagic `mobile-finder`. Job results include `suppressed_by_need` (eligible phone lookups not issued). `estimate_only` quotes AI Ark at **1.0 credit/row** for email-only (1.5 is the email+phone bundle). One row is one attempt per tier; AI Ark search-then-export is 1 attempt and 2 `vendor_calls`.
+`need='email'` never calls AI Ark `mobile-phone-finder` or later phone finders. Job results include `suppressed_by_need` (eligible phone lookups not issued). `estimate_only` quotes AI Ark at **1.0 credit/row** for email-only (1.5 is the email+phone bundle) plus a USD total. One row is one attempt per tier; AI Ark search-then-export is 1 attempt and 2 `vendor_calls`.
 
 ## Name + company (no domain)
 
-Rows with `first_name` + `last_name` + `company_name` and no domain are tagged `mode=name_company`. GetLeads uses `getleads_enrich_person_batch` (name + company; never the LinkedIn batch tool). Smartlead is skipped (needs a domain). Then AI Ark → LeadMagic → Prospeo → FullEnrich. `company_name` is sent to FullEnrich verbatim (never replaced with a domain string). When a tier returns an email, its domain is written onto the row for later tiers.
+Rows with `first_name` + `last_name` + `company_name` and no domain are tagged `mode=name_company`. GetLeads uses `getleads_enrich_person_batch` (name + company; never the LinkedIn batch tool). Smartlead is skipped (needs a domain). Then AI Ark → Prospeo → FullEnrich. `company_name` is sent to FullEnrich verbatim (never replaced with a domain string). When a tier returns an email, its domain is written onto the row for later tiers.
 
 GetLeads email routing is explicit: `linkedin_url` → `getleads_get_emails_from_linkedin_batch` with `{items:[{linkedin_url}], limit_per_item:1}`; first + last + (domain or company) → `getleads_enrich_person_batch` with a non-empty `items` array (up to 50 per call); otherwise the tier is skipped and no MCP call is sent. A vendor that errors on more than 20 of its first 25 calls is disabled for the rest of the job. `get_job_status` reports `tier_stats.*.first_error` and GetLeads `credits_charged` (1 credit per successful enrich row).
 
@@ -76,10 +78,11 @@ Peterson queue:
 ```json
 {
   "source_table": "client_peterson.email_resolution",
-  "where": "dl_status is null",
+  "where": "wf_status is null",
   "client_tag": "peterson",
   "need": "email",
-  "max_tier": "leadmagic",
+  "max_tier": "prospeo",
+  "approve_cost_usd": 5,
   "estimate_only": true
 }
 ```
@@ -107,7 +110,7 @@ Richer `source` object still works:
 }
 ```
 
-`source` is read server-side with the service role, paged 500 rows at a time. Results still write `public.{client_tag}_wf_contacts`. Writeback patches the queue per row: `dl_status` / `candidate_email` / `dl_provider` when those columns exist (Peterson `email_resolution`), plus `wf_*` when present (`wf_phone` / `wf_phone_type` for phone hits). Resume with `where: "dl_status is null"`.
+`source` is read server-side with the service role, paged 500 rows at a time. Results still write `public.{client_tag}_wf_contacts`. Writeback patches `wf_*` only (`wf_status` / `wf_email` / `wf_vendor` / `wf_phone` / `wf_phone_type`). Never read or write `dl_status`, `sg_exclude`, or `skip_*`. Resume with `where: "wf_status is null"`.
 
 Smartlead 429 / rate-limit backs off and retries. It does not set `credits_exhausted` while used is still below total. Finder calls share one process-wide semaphore (default `SMARTLEAD_CONCURRENCY=3`), including across background jobs.
 
@@ -136,9 +139,9 @@ curl -sS -X POST https://<railway-host>/enrich-one \
 Project: `campaignintelligence` (`azpapwtnrbzywlnxxecz`)
 
 - Companies upsert on `domain`. Duplicate domains in one batch are merged first (avoids Postgres `21000`).
-- Contacts with email: `ON CONFLICT (domain, email) DO UPDATE` (merge; cellphone + `line_type` refresh).
-- Null-email contacts insert separately (no conflict target).
-- `line_type` is added on `{client}_*contacts` via `ew_ensure_contact_columns` (also in migration 005).
+- Contacts upsert on `(client_tag, domain, first_name_key, last_name_key)` (migration 006 unique index). Email-only rows still merge on `(domain, email)`.
+- Re-running a job must not insert a second null-email row for the same person.
+- `line_type` / name keys are added on `{client}_*contacts` via `ew_ensure_contact_columns` / `ew_ensure_contact_person_key` (migrations 005–006). Do not apply 006 until existing person-key duplicates are cleaned up separately.
 
 ## Local run
 
@@ -183,7 +186,7 @@ railway variables set \
   GETLEADS_CLIENT_ID=… \
   GETLEADS_REFRESH_TOKEN=… \
   AI_ARK_API_KEY=… \
-  LEADMAGIC_API_KEY=…
+  PROSPEO_API_KEY=…
 # optional: FULLENRICH_API_KEY=…
 ```
 

@@ -1,7 +1,7 @@
 """DM / work-email enrichment waterfall.
 
 Tiers (fixed, no Maps, no website crawl, no Apify):
-  getleads → Smartlead → AI Ark → LeadMagic → Prospeo → FullEnrich
+  getleads → Smartlead → AI Ark → Prospeo → FullEnrich
 
 Implementation is split under email_waterfall._wf so GitHub MCP can
 upload the modules. This module stays the public import surface.
@@ -15,22 +15,26 @@ from .clients import ensure_client
 from .vendors.ai_ark import AiArkClient
 from .vendors.fullenrich import FullEnrichClient
 from .vendors.getleads import GetLeadsClient
-from .vendors.leadmagic import LeadMagicClient
 from .vendors.prospeo import ProspeoClient
 from .vendors.smartlead import SmartleadClient
 from .vendors.veriphone import VeriphoneClient
 
 from ._wf.const import (
     CREDIT_PER_ATTEMPT,
+    DEFAULT_APPROVE_COST_USD,
+    DEFAULT_APPROVE_COST_USD_ONE,
     DEFAULT_MAX_TIER,
     NAME_COMPANY_TIERS,
     Need,
     MaxTier,
     TIER_ORDER,
     TIER_RANK,
+    attempt_cost_usd,
     classify_rows,
     estimate_waterfall,
     normalize_max_tier,
+    resolve_max_tier,
+    resolve_skip_tiers,
     tier_allowed,
     _norm_row,
     _parse_rows,
@@ -45,7 +49,6 @@ __all__ = [
     "AiArkClient",
     "FullEnrichClient",
     "GetLeadsClient",
-    "LeadMagicClient",
     "ProspeoClient",
     "SmartleadClient",
     "VeriphoneClient",
@@ -54,11 +57,16 @@ __all__ = [
     "compact_person_hit",
     "enrich_one_person",
     "enrich_waterfall",
+    "attempt_cost_usd",
     "estimate_waterfall",
     "normalize_max_tier",
     "tier_allowed",
     "TIER_ORDER",
     "DEFAULT_MAX_TIER",
+    "DEFAULT_APPROVE_COST_USD",
+    "DEFAULT_APPROVE_COST_USD_ONE",
+    "resolve_max_tier",
+    "resolve_skip_tiers",
     "supabase_sync",
     "table_source",
 ]

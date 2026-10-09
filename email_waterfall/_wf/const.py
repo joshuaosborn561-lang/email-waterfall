@@ -1,27 +1,24 @@
 """DM / work-email enrichment waterfall.
 
 Tiers (fixed, no Maps, no website crawl, no Apify):
-  getleads → Smartlead (plan email finder) → AI Ark → LeadMagic → Prospeo → FullEnrich
+  getleads → Smartlead (plan email finder) → AI Ark → Prospeo → FullEnrich
 
 AI Ark is third on BOTH lanes after the included Smartlead allotment is used:
   people/DM: People Search by domain
   email: LinkedIn URL / person id / name+domain / phone → export/single
 
 Also fills cellphone: AI Ark mobile-phone-finder (LinkedIn or name+domain),
-then LeadMagic mobile-finder, then Prospeo, then FullEnrich if max_tier
-allows. FullEnrich requests contact.phones (most_probable_phone / MOBILE).
+then Prospeo, then FullEnrich if max_tier allows. FullEnrich requests
+contact.phones (most_probable_phone / MOBILE). Vendor-found numbers are
+checked with Veriphone GET /v2/verify (phone_valid + phone_type=mobile)
+before they are accepted. Landline / voip / invalid fall through.
 
-On need='phone' only, every candidate number (input or vendor) is checked
-with Veriphone GET /v2/verify. Only phone_type=mobile is written as cellphone.
-Landline / voip / invalid fall through to the next finder. The number and
-Veriphone phone_type are written back to the source table as wf_phone /
-wf_phone_type, and to {client}_*contacts.line_type. need='both' / 'email'
-skip Veriphone unless verify_only=True (check numbers we already have; no
-finder spend).
+On need='phone' (or verify_only), input numbers are also Veriphone-checked.
+need='email' never calls phone endpoints.
 
 `need` is an allowlist of vendor capabilities (email / phone / people), applied
-before any vendor HTTP call. need='email' must not call phone endpoints.
-AI Ark search-then-export is one attempt and two vendor_calls.
+before any vendor HTTP call. AI Ark search-then-export is one attempt and two
+vendor_calls.
 
 Writes to public.{client}_companies / public.{client}_contacts.
 """
@@ -30,14 +27,11 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from email_waterfall.clients import ClientConfig
 from email_waterfall.need import (
-    capabilities,
     credit_per_row,
     estimate_suppressed,
     resolve_need,
@@ -49,22 +43,20 @@ from email_waterfall.vendors.smartlead import SmartleadClient
 log = logging.getLogger("email_waterfall.waterfall")
 
 Need = Literal["email", "dm", "both", "phone", "people_email"]
-MaxTier = Literal["getleads", "smartlead", "aiark", "leadmagic", "prospeo", "fullenrich"]
+MaxTier = Literal["getleads", "smartlead", "aiark", "prospeo", "fullenrich"]
 
 TIER_ORDER: list[str] = [
     "getleads",
     "smartlead",
     "aiark",
-    "leadmagic",
     "prospeo",
     "fullenrich",
 ]
 TIER_RANK = {name: i for i, name in enumerate(TIER_ORDER)}
-DEFAULT_MAX_TIER: MaxTier = "leadmagic"
+DEFAULT_MAX_TIER: MaxTier = "prospeo"
 NAME_COMPANY_TIERS: tuple[str, ...] = (
     "getleads",
     "aiark",
-    "leadmagic",
     "prospeo",
     "fullenrich",
 )
@@ -74,30 +66,108 @@ CREDIT_PER_ATTEMPT: dict[str, float] = {
     "getleads": 1.0,
     "smartlead": 1.0,
     "aiark": 1.5,
-    "leadmagic": 1.0,
     "prospeo": 1.0,
     "fullenrich": 1.0,
 }
 
+# Booked $/credit (Josh's contract rates). getleads / Smartlead / Veriphone are $0.
+USD_PER_CREDIT: dict[str, float] = {
+    "getleads": 0.0,
+    "smartlead": 0.0,
+    "aiark": 0.003667,
+    "prospeo": 0.0148,
+    "fullenrich": 0.055,
+    "veriphone": 0.0,
+}
+
+# Bulk jobs default to $5 so raising max_tier to Prospeo cannot run unbounded.
+# enrich-one / enrich_person default is $0.25 (full email path + AI Ark/Prospeo mobile).
+DEFAULT_APPROVE_COST_USD = 5.0
+DEFAULT_APPROVE_COST_USD_ONE = 0.25
+
+TIER_ALIASES: dict[str, str] = {
+    "ai_ark": "aiark",
+    "ai-ark": "aiark",
+    "full_enrich": "fullenrich",
+    "full-enrich": "fullenrich",
+    "fe": "fullenrich",
+    "get_leads": "getleads",
+    "smart_lead": "smartlead",
+    "smart-lead": "smartlead",
+    "sl": "smartlead",
+    "prospector": "prospeo",
+    "apify": "getleads",  # Apify is not in this service; start at first paid tier
+}
+
+# Retired LeadMagic names. skip_tiers treats them as no-ops. max_tier maps to
+# the old "stop before Prospeo" ceiling (AI Ark).
+LEGACY_TIER_NAMES: frozenset[str] = frozenset(
+    {
+        "leadmagic",
+        "lm",
+        "lead_magic",
+        "lead-magic",
+        "leadmagic_employee",
+        "leadmagic_role",
+        "leadmagic_search_free",
+        "employee_finder",
+        "lm_employee",
+        "lm_role",
+    }
+)
+LEGACY_MAX_TIER_CEILING = "aiark"
+
+STATUS_COMPLETED = "completed"
+STATUS_REFUSED_OVER_CEILING = "refused_over_ceiling"
+STATUS_STOPPED_AT_CEILING = "stopped_at_ceiling"
+
+
+def _canon_tier_name(raw: str) -> str:
+    return (raw or "").strip().lower().replace(" ", "_")
+
+
+def is_legacy_tier(name: str) -> bool:
+    return _canon_tier_name(name) in LEGACY_TIER_NAMES
+
+
+def attempt_cost_usd(tier: str, *, credits: float | None = None) -> float:
+    """Booked USD for one attempt (or an explicit credit count) at `tier`."""
+    per = CREDIT_PER_ATTEMPT.get(tier, 1.0) if credits is None else float(credits)
+    return round(per * float(USD_PER_CREDIT.get(tier, 0.0)), 6)
+
+
+def estimate_cost_usd(estimate: dict[str, Any]) -> float:
+    total = 0.0
+    for tier, row in (estimate or {}).items():
+        if not isinstance(row, dict):
+            continue
+        credits = row.get("credits_est")
+        if credits is None:
+            continue
+        total += attempt_cost_usd(tier, credits=float(credits))
+    return round(total, 6)
+
+
+def _legacy_max_tier_warning(raw: str, ceiling: str) -> str:
+    return (
+        f"deprecated max_tier={raw!r} is a retired LeadMagic name; "
+        f"treated as max_tier={ceiling!r} (old stop-before-Prospeo ceiling)"
+    )
+
+
+def _legacy_skip_warning(raw: str) -> str:
+    return (
+        f"deprecated skip_tiers entry {raw!r} is a retired LeadMagic name; "
+        "ignored (no-op)"
+    )
+
 
 def normalize_max_tier(max_tier: str | None) -> str:
-    t = (max_tier or DEFAULT_MAX_TIER).strip().lower()
-    aliases = {
-        "ai_ark": "aiark",
-        "ai-ark": "aiark",
-        "full_enrich": "fullenrich",
-        "full-enrich": "fullenrich",
-        "fe": "fullenrich",
-        "get_leads": "getleads",
-        "smart_lead": "smartlead",
-        "smart-lead": "smartlead",
-        "sl": "smartlead",
-        "lead_magic": "leadmagic",
-        "lm": "leadmagic",
-        "prospector": "prospeo",
-        "apify": "getleads",  # Apify is not in this service; start at first paid tier
-    }
-    t = aliases.get(t, t)
+    raw = (max_tier if max_tier not in (None, "") else DEFAULT_MAX_TIER)
+    t = _canon_tier_name(str(raw))
+    if is_legacy_tier(t):
+        return LEGACY_MAX_TIER_CEILING
+    t = TIER_ALIASES.get(t, t)
     if t not in TIER_RANK:
         raise ValueError(
             f"max_tier must be one of {', '.join(TIER_ORDER)}; got {max_tier!r}"
@@ -105,7 +175,83 @@ def normalize_max_tier(max_tier: str | None) -> str:
     return t
 
 
-def tier_allowed(tier: str, max_tier: str) -> bool:
+def resolve_max_tier(max_tier: str | None) -> tuple[str, str | None, list[str]]:
+    """Return (canonical, deprecated_input_or_None, warnings)."""
+    raw = (max_tier if max_tier not in (None, "") else DEFAULT_MAX_TIER)
+    t = _canon_tier_name(str(raw))
+    warnings: list[str] = []
+    deprecated: str | None = None
+    if is_legacy_tier(t):
+        deprecated = t
+        warnings.append(_legacy_max_tier_warning(str(raw).strip(), LEGACY_MAX_TIER_CEILING))
+        log.warning("%s", warnings[-1])
+        return LEGACY_MAX_TIER_CEILING, deprecated, warnings
+    return normalize_max_tier(max_tier), None, warnings
+
+
+def _parse_name_list(value: Any) -> list[str]:
+    if value in (None, "", [], ()):
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+        return [p.strip() for p in text.split(",") if p.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(x).strip() for x in value if str(x).strip()]
+    raise ValueError("skip_tiers must be a list or comma-separated string")
+
+
+def resolve_skip_tiers(skip_tiers: Any = None) -> tuple[set[str], list[str], list[str]]:
+    """Return (canonical skip set, deprecated names, warnings).
+
+    Legacy LeadMagic names are accepted and ignored. Unknown names error.
+    """
+    skip: set[str] = set()
+    deprecated: list[str] = []
+    warnings: list[str] = []
+    for raw in _parse_name_list(skip_tiers):
+        name = _canon_tier_name(raw)
+        if is_legacy_tier(name):
+            deprecated.append(name)
+            warnings.append(_legacy_skip_warning(raw))
+            log.warning("%s", warnings[-1])
+            continue
+        name = TIER_ALIASES.get(name, name)
+        if name not in TIER_RANK:
+            raise ValueError(
+                f"skip_tiers entries must be one of {', '.join(TIER_ORDER)}; got {raw!r}"
+            )
+        skip.add(name)
+    return skip, deprecated, warnings
+
+
+def resolve_approve_cost_usd(
+    value: float | int | str | None,
+    *,
+    default: float = DEFAULT_APPROVE_COST_USD,
+) -> float:
+    if value in (None, ""):
+        return float(default)
+    try:
+        n = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("approve_cost_usd must be a number") from exc
+    if n < 0:
+        raise ValueError("approve_cost_usd must be >= 0")
+    return n
+
+
+def tier_allowed(tier: str, max_tier: str, skip_tiers: set[str] | None = None) -> bool:
+    if skip_tiers and tier in skip_tiers:
+        return False
     return TIER_RANK[tier] <= TIER_RANK[normalize_max_tier(max_tier)]
 
 
@@ -225,8 +371,10 @@ def _fill_row_domain(row: dict[str, Any], *, email: str = "", raw: Any = None) -
         row["domain"] = host
 
 
-def _tiers_for_mode(mode: str, max_tier: str) -> list[str]:
-    allowed = [t for t in TIER_ORDER if tier_allowed(t, max_tier)]
+def _tiers_for_mode(
+    mode: str, max_tier: str, skip_tiers: set[str] | None = None
+) -> list[str]:
+    allowed = [t for t in TIER_ORDER if tier_allowed(t, max_tier, skip_tiers)]
     if mode == "name_company":
         return [t for t in allowed if t in NAME_COMPANY_TIERS]
     if mode == "domain":
@@ -253,17 +401,24 @@ def estimate_waterfall(
     client: ClientConfig,
     verify_only: bool = False,
     caps: frozenset[str] | None = None,
+    skip_tiers: set[str] | None = None,
+    approve_cost_usd: float | None = None,
+    warnings: list[str] | None = None,
+    deprecated_max_tier: str | None = None,
+    deprecated_tiers: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Counts + per-vendor credit estimate. No enrichment vendor calls."""
+    """Counts + per-vendor credit / USD estimate. No enrichment vendor calls."""
     max_tier_n = normalize_max_tier(max_tier)
+    skip = set(skip_tiers or ())
     need_norm, need_caps = resolve_need(need) if caps is None else (need, caps)
+    notes = list(warnings or [])
     modes = classify_rows(parsed)
     if verify_only:
         mode_counts = {k: v for k, v in modes.items() if k != "skipped" and v}
         if modes.get("skipped"):
             mode_counts["skipped"] = modes["skipped"]
         with_phone = sum(1 for r in parsed if (r.get("phone") or "").strip())
-        return {
+        out = {
             "estimate_only": True,
             "verify_only": True,
             "rows_in": sum(v for k, v in modes.items() if k != "skipped"),
@@ -275,13 +430,22 @@ def estimate_waterfall(
             "need_capabilities": sorted(need_caps),
             "suppressed_by_need": {},
             "max_tier": max_tier_n,
+            "skip_tiers": sorted(skip),
             "client_tag": client.tag,
             "companies_table": client.companies_table,
             "contacts_table": client.contacts_table,
             "spend": 0,
+            "estimated_cost_usd": 0.0,
+            "approve_cost_usd": approve_cost_usd,
+            "warnings": notes,
         }
+        if deprecated_max_tier:
+            out["deprecated_max_tier"] = deprecated_max_tier
+        if deprecated_tiers:
+            out["deprecated_tiers"] = deprecated_tiers
+        return out
     tiers_by_mode = {
-        mode: _tiers_for_mode(mode, max_tier_n)
+        mode: _tiers_for_mode(mode, max_tier_n, skip)
         for mode in ("domain", "name_company")
         if modes.get(mode)
     }
@@ -289,7 +453,7 @@ def estimate_waterfall(
     for mode, count in modes.items():
         if mode == "skipped" or not count:
             continue
-        for tier in _tiers_for_mode(mode, max_tier_n):
+        for tier in _tiers_for_mode(mode, max_tier_n, skip):
             vendor_rows[tier] += count
 
     credits: dict[str, Any] = {}
@@ -309,10 +473,12 @@ def estimate_waterfall(
         per_row = credit_per_row(
             tier, need_norm, CREDIT_PER_ATTEMPT.get(tier, 1.0), need_caps
         )
+        credits_est = round(count * per_row, 2)
         row = {
             "rows": count,
-            "credits_est": round(count * per_row, 2),
+            "credits_est": credits_est,
             "credits_per_row": per_row,
+            "usd_est": attempt_cost_usd(tier, credits=credits_est),
             "credits_available": None,
         }
         if tier == "aiark":
@@ -331,7 +497,8 @@ def estimate_waterfall(
     mode_counts = {k: v for k, v in modes.items() if k != "skipped" and v}
     if modes.get("skipped"):
         mode_counts["skipped"] = modes["skipped"]
-    return {
+    estimated_usd = estimate_cost_usd(credits)
+    out = {
         "estimate_only": True,
         "rows_in": sum(v for k, v in modes.items() if k != "skipped"),
         "modes": mode_counts,
@@ -341,11 +508,23 @@ def estimate_waterfall(
         "need_capabilities": sorted(need_caps),
         "suppressed_by_need": estimate_suppressed(vendor_rows, need_norm, need_caps),
         "max_tier": max_tier_n,
+        "skip_tiers": sorted(skip),
         "client_tag": client.tag,
         "companies_table": client.companies_table,
         "contacts_table": client.contacts_table,
         "spend": 0,
+        "estimated_cost_usd": estimated_usd,
+        "approve_cost_usd": approve_cost_usd,
         "verify_only": False,
+        "warnings": notes,
     }
+    if deprecated_max_tier:
+        out["deprecated_max_tier"] = deprecated_max_tier
+    if deprecated_tiers:
+        out["deprecated_tiers"] = deprecated_tiers
+    if approve_cost_usd is not None and estimated_usd > approve_cost_usd:
+        out["would_refuse"] = True
+        out["status"] = STATUS_REFUSED_OVER_CEILING
+    return out
 
 

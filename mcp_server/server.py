@@ -23,7 +23,7 @@ mcp = MCPServer(
         "Not a Maps scraper or website crawler."
     ),
     instructions=INSTRUCTIONS,
-    version="1.4.0",
+    version="1.6.0",
 )
 
 
@@ -176,13 +176,11 @@ def health() -> str:
     from email_waterfall.config import settings
     from email_waterfall.vendors.ai_ark import AiArkClient
     from email_waterfall.vendors.getleads import GetLeadsClient
-    from email_waterfall.vendors.leadmagic import LeadMagicClient
 
     aiark = _paid_vendor_balance("aiark", AiArkClient(timeout=8))
-    leadmagic = _paid_vendor_balance("leadmagic", LeadMagicClient(timeout=8))
     reasons = [
         snap["reason"]
-        for snap in (aiark, leadmagic)
+        for snap in (aiark,)
         if snap.get("configured") and snap.get("ok") is False and snap.get("reason")
     ]
     return _json(
@@ -198,7 +196,6 @@ def health() -> str:
                 "getleads": GetLeadsClient().health_snapshot(),
                 "smartlead": bool(settings.smartlead_api_key),
                 "aiark": aiark,
-                "leadmagic": leadmagic,
                 "prospeo": bool(settings.prospeo_api_key),
                 "fullenrich": bool(settings.fullenrich_api_key),
                 "veriphone": bool(settings.veriphone_api_key),
@@ -215,7 +212,8 @@ def health() -> str:
                 }
                 for c in list_registered_clients()
             },
-            "max_tier_default": "leadmagic",
+            "max_tier_default": "prospeo",
+            "approve_cost_usd_default": 5.0,  # DEFAULT_APPROVE_COST_USD
             "auth": "none",
             "note": (
                 "Any snake_case client_tag works. Call ensure_client or "
@@ -391,7 +389,6 @@ def getleads_search(
     from email_waterfall.supabase_sync import (
         company_row,
         contact_row,
-        insert_contacts,
         upsert_contacts,
         upsert_companies,
     )
@@ -448,12 +445,8 @@ def getleads_search(
             )
         if companies:
             companies_upserted = upsert_companies(cfg, companies)
-        with_email = [c for c in contacts if c.get("email")]
-        without = [c for c in contacts if not c.get("email")]
-        if with_email:
-            contacts_written += upsert_contacts(cfg, with_email)
-        if without:
-            contacts_written += insert_contacts(cfg, without)
+        if contacts:
+            contacts_written += upsert_contacts(cfg, contacts)
 
     return _json(
         {
@@ -485,7 +478,7 @@ def enrich_waterfall(
     client_tag: str,
     rows: list[dict[str, Any]] | str | None = None,
     need: str = "both",
-    max_tier: str = "leadmagic",
+    max_tier: str = "prospeo",
     target_titles: str | list[str] | None = None,
     require_title_match: bool = True,
     background: bool = True,
@@ -498,6 +491,8 @@ def enrich_waterfall(
     find_people: bool | None = None,
     find_email: bool | None = None,
     find_phone: bool | None = None,
+    skip_tiers: str | list[str] | None = None,
+    approve_cost_usd: float | None = 5.0,
 ) -> str:
     """Resolve DMs + work emails + cellphones via paid vendors; write public.{client}_*.
 
@@ -512,8 +507,7 @@ def enrich_waterfall(
     email?, linkedin_url?, phone?, cellphone?, mobile?, place_id?, city?, state?}.
     Domain OR (first_name + last_name + company_name) is required. Name+company
     rows use GetLeads enrich_person_batch, skip Smartlead, then AI Ark →
-    LeadMagic → Prospeo → FullEnrich. company_name is passed to FullEnrich
-    verbatim.
+    Prospeo → FullEnrich. company_name is passed to FullEnrich verbatim.
 
     `source` = optional richer object {project_id, schema?, table, where?,
     key_column?, map?, limit?, cursor?}. Mutually exclusive with rows.
@@ -523,7 +517,7 @@ def enrich_waterfall(
 
     `verify_only` = true checks existing phone numbers with Veriphone and
     writes the number + line type. No finder HTTP. Use this to classify
-    numbers already on the queue without paying AI Ark / LeadMagic again.
+    numbers already on the queue without paying later paid finders again.
 
     `estimate_only` = true returns row counts per mode, tiers each mode will
     touch, and a per-vendor credit estimate. Zero spend. Required before paid
@@ -540,16 +534,22 @@ def enrich_waterfall(
     need = 'dm' | 'email' | 'both' | 'phone' | 'people_email'. Gates vendor
     *calls*, not just output. need='people_email' finds people + emails and
     never calls phone endpoints. need='both' includes phone. need='email'
-    never hits phone/mobile endpoints (AI Ark mobile-phone-finder, LeadMagic
-    mobile-finder, Prospeo enrich_mobile, FullEnrich contact.phones, Veriphone).
+    never hits phone/mobile endpoints (AI Ark mobile-phone-finder, Prospeo
+    enrich_mobile, FullEnrich contact.phones, Veriphone).
     need='phone' never hits
-    email finders. On need='phone' every candidate number is sent to Veriphone
-    /v2/verify; only phone_type=mobile is written as cellphone. The number and
+    email finders. Vendor-found numbers are sent to Veriphone /v2/verify;
+    only phone_valid + phone_type=mobile is written as cellphone. The number and
     Veriphone phone_type are always written back (wf_phone / wf_phone_type,
-    contacts.line_type). Existing contact rows are updated, not skipped.
+    contacts.line_type). Existing contact rows upsert on the person key
+    (client_tag, domain, first_name_key, last_name_key), not inserted again.
     max_tier caps depth independently.
-    max_tier = 'getleads' | 'smartlead' | 'aiark' | 'leadmagic' | 'prospeo' | 'fullenrich'
-    (default 'leadmagic' / alias 'lm' — stops before Prospeo and FullEnrich).
+    max_tier = 'getleads' | 'smartlead' | 'aiark' | 'prospeo' | 'fullenrich'
+    (default 'prospeo'). Legacy LeadMagic names (leadmagic / lm / lead_magic)
+    are accepted as a no-op warning and map to the old AI Ark ceiling.
+    approve_cost_usd (default 5.0) estimates first and refuses if the quote
+    exceeds the ceiling; a run that would go over stops with
+    status=stopped_at_ceiling. Never read or write dl_status, sg_exclude,
+    or skip_* columns — resume with wf_status is null.
     """
     _ensure_repo_cwd()
     _reload_settings()
@@ -577,7 +577,7 @@ def enrich_waterfall(
             rows,
             client_tag=client.tag,
             need=need,  # type: ignore[arg-type]
-            max_tier=max_tier_n,
+            max_tier=max_tier,
             target_titles=target_titles,
             require_title_match=bool(require_title_match),
             write_supabase=not estimate_only,
@@ -591,6 +591,8 @@ def enrich_waterfall(
             find_people=find_people,
             find_email=find_email,
             find_phone=find_phone,
+            skip_tiers=skip_tiers,
+            approve_cost_usd=approve_cost_usd,
         )
 
     def _run(job: Any) -> dict[str, Any]:
@@ -668,6 +670,8 @@ def enrich_person(
     need: str = "both",
     max_tier: str = "fullenrich",
     write_supabase: bool = False,
+    approve_cost_usd: float | None = 0.25,
+    skip_tiers: str | list[str] | None = None,
 ) -> str:
     """Look up one prospect through the waterfall and return that compact hit.
 
@@ -695,6 +699,8 @@ def enrich_person(
                 need=need,
                 max_tier=max_tier,
                 write_supabase=bool(write_supabase),
+                approve_cost_usd=approve_cost_usd,
+                skip_tiers=skip_tiers,
             )
         )
     except Exception as exc:
@@ -764,6 +770,8 @@ def _mount_http_routes() -> None:
                 need=str(body.get("need") or "both"),
                 max_tier=str(body.get("max_tier") or "fullenrich"),
                 write_supabase=bool(body.get("write_supabase") or False),
+                approve_cost_usd=body.get("approve_cost_usd"),
+                skip_tiers=body.get("skip_tiers"),
             )
         except Exception as exc:
             return JSONResponse(
