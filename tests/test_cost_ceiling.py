@@ -103,9 +103,13 @@ def test_bump_attempt_hard_stops_when_next_would_exceed() -> None:
     )
     row1 = {"domain": "a.com"}
     row2 = {"domain": "b.com"}
-    assert wf._bump_attempt("aiark", row1) is True
+    # Hit-priced: attempt does not book. Book the actual email hit, then the
+    # next worst-case (search+email = 1.5 cr) exceeds $0.006.
+    assert wf._bump_attempt("aiark", row1, worst_credits=1.5) is True
+    assert wf.spend_usd == 0
+    wf._book_actual("aiark", 1.0)
     assert wf.spend_usd == waterfall.attempt_cost_usd("aiark", credits=1.0)
-    assert wf._bump_attempt("aiark", row2) is False
+    assert wf._bump_attempt("aiark", row2, worst_credits=1.5) is False
     assert wf.stopped_at_ceiling is True
     assert wf._allowed("aiark") is False
 
@@ -126,7 +130,7 @@ def test_running_spend_stops_at_ceiling(monkeypatch) -> None:
 
     monkeypatch.setattr(exec_mod, "estimate_waterfall", cheap_quote)
     sink: dict = {}
-    ark = _vendor(email=None)
+    ark = _vendor(email=EmailHit(email="jane@x.com", source_tier="aiark"))
     _patch_clients(
         monkeypatch,
         gl=_vendor(email=None),
@@ -135,8 +139,8 @@ def test_running_spend_stops_at_ceiling(monkeypatch) -> None:
         prospeo=_vendor(enabled=False),
     )
     _patch_writes(monkeypatch, sink)
-    # AI Ark email-only is 1.0 cr × $0.003667 ≈ $0.0037 per row.
-    # Ceiling 0.006 lets the first paid attempt through, then stops.
+    # Actual email hit is 1.0 cr × $0.003667. Worst-case next call is 1.5 cr.
+    # Ceiling 0.006 lets the first hit through, then stops.
     out = waterfall.enrich_waterfall(
         [
             {

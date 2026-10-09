@@ -55,7 +55,9 @@ On `need='phone'` (or `verify_only`), input numbers are also Veriphone-checked. 
 | `dm` | people-discovery only | phone and email finders |
 | `both` | email + phone + people | — |
 
-`need='email'` never calls AI Ark `mobile-phone-finder` or later phone finders. Job results include `suppressed_by_need` (eligible phone lookups not issued). `estimate_only` quotes AI Ark at **1.0 credit/row** for email-only (1.5 is the email+phone bundle) plus a USD total. One row is one attempt per tier; AI Ark search-then-export is 1 attempt and 2 `vendor_calls`.
+`need='email'` never calls AI Ark `mobile-phone-finder` or later phone finders. Job results include `suppressed_by_need` (eligible phone lookups not issued).
+
+AI Ark and Prospeo **charge only on a hit** (miss = $0). AI Ark: 0.5 cr people-search result, 1 cr email found, 5 cr mobile found ($0.003667/credit). Prospeo: 1 cr email found, 10 cr mobile found ($0.0148/credit). `estimate_only` quotes the **worst-case** (assume hit) so a name+domain email-only row is 1.5 AI Ark credits (search + email). Recorded `spend` is actual billed credits. One row is one attempt per tier; AI Ark search-then-export is 1 attempt and 2 `vendor_calls`.
 
 ## Name + company (no domain)
 

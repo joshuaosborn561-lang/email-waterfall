@@ -57,8 +57,8 @@ def test_estimate_only_name_company_no_spend(monkeypatch) -> None:
     assert out["estimate"]["getleads"]["rows"] == 956
     assert "smartlead" not in out["estimate"]
     assert out["estimate"]["aiark"]["rows"] == 956
-    assert out["estimate"]["aiark"]["credits_per_row"] == 1.0
-    assert out["estimate"]["aiark"]["credits_est"] == 956.0
+    assert out["estimate"]["aiark"]["credits_per_row"] == 1.5
+    assert out["estimate"]["aiark"]["credits_est"] == 1434.0
     assert out["estimate"]["aiark"]["rate_note"] == "email-only"
     assert out["need_capabilities"] == ["email"]
     assert out["suppressed_by_need"]["aiark_phone"] == 956
@@ -136,8 +136,8 @@ def test_estimate_only_both_quotes_aiark_email_plus_phone(monkeypatch) -> None:
         estimate_only=True,
         write_supabase=False,
     )
-    assert out["estimate"]["aiark"]["credits_per_row"] == 1.5
-    assert out["estimate"]["aiark"]["credits_est"] == 1.5
+    assert out["estimate"]["aiark"]["credits_per_row"] == 6.5
+    assert out["estimate"]["aiark"]["credits_est"] == 6.5
     assert out["estimate"]["aiark"]["rate_note"] == "email+phone"
     assert out["need_capabilities"] == ["email", "people", "phone"]
     assert out["suppressed_by_need"] == {}
@@ -165,8 +165,8 @@ def test_estimate_only_find_phone_false_excludes_phone_credits(monkeypatch) -> N
     )
     assert out["need"] == "people_email"
     assert out["need_capabilities"] == ["email", "people"]
-    assert out["estimate"]["aiark"]["credits_per_row"] == 1.0
-    assert out["estimate"]["aiark"]["credits_est"] == 1.0
+    assert out["estimate"]["aiark"]["credits_per_row"] == 1.5
+    assert out["estimate"]["aiark"]["credits_est"] == 1.5
     assert out["estimate"]["aiark"]["rate_note"] == "email-only"
     assert "aiark_phone" in out["suppressed_by_need"]
     assert "leadmagic_phone" not in out["suppressed_by_need"]

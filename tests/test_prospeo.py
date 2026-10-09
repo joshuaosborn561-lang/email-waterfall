@@ -42,6 +42,27 @@ def test_find_email_name_domain(monkeypatch) -> None:
     assert hit is not None
     assert hit.email == "jane@roofco.com"
     assert hit.source_tier == "prospeo"
+    assert client.credits_charged == 1.0
+    assert client.last_credits == 1.0
+    assert client.errors == 0
+
+
+def test_find_email_auth_error_is_an_error(monkeypatch) -> None:
+    client = ProspeoClient(api_key="pk_test")
+
+    def fake_post(tier, url, json=None, headers=None, timeout=45):
+        class Resp:
+            status_code = 401
+
+            def json(self):
+                return {"error": True, "error_code": "UNAUTHORIZED"}
+
+        return Resp()
+
+    _patch_post(monkeypatch, fake_post)
+    assert client.find_email("Jane", "Smith", "roofco.com") is None
+    assert client.errors == 1
+    assert client.credits_charged == 0
 
 
 def test_find_email_rejects_masked(monkeypatch) -> None:
@@ -79,6 +100,10 @@ def test_find_email_no_match(monkeypatch) -> None:
 
     _patch_post(monkeypatch, fake_post)
     assert client.find_email("Jane", "Smith", "roofco.com") is None
+    assert client.errors == 0
+    assert client.hits == 0
+    assert client.credits_charged == 0
+    assert client.last_credits == 0
 
 
 def test_find_email_linkedin_only(monkeypatch) -> None:
@@ -127,3 +152,24 @@ def test_find_mobile_enrich_mobile(monkeypatch) -> None:
     assert hit is not None
     assert hit.phone == "+12015550100"
     assert hit.source_tier == "prospeo"
+    assert client.credits_charged == 10.0
+    assert client.last_credits == 10.0
+    assert client.errors == 0
+
+
+def test_find_mobile_no_match_is_not_an_error(monkeypatch) -> None:
+    client = ProspeoClient(api_key="pk_test")
+
+    def fake_post(tier, url, json=None, headers=None, timeout=45):
+        class Resp:
+            status_code = 400
+
+            def json(self):
+                return {"error": True, "error_code": "NO_MATCH"}
+
+        return Resp()
+
+    _patch_post(monkeypatch, fake_post)
+    assert client.find_mobile("Jane", "Smith", "roofco.com") is None
+    assert client.errors == 0
+    assert client.credits_charged == 0
