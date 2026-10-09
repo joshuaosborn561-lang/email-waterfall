@@ -3,8 +3,10 @@
 Hard rules:
 - client_tag required; never a shared contacts table
 - companies upsert on domain, after deduping the batch by domain
-- contacts with email → merge-duplicates on (domain, email)
-- null-email contacts insert separately (no ON CONFLICT)
+- contacts upsert on (client_tag, domain, first_name_key, last_name_key)
+  when a person key is present (migration 006 unique index)
+- email-only contacts (no name keys) still merge on (domain, email)
+- never read or write dl_status, sg_exclude, or skip_* columns
 """
 
 from __future__ import annotations
@@ -143,6 +145,40 @@ def dedupe_companies(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [by_domain[d] for d in order]
 
 
+def _person_key(row: dict[str, Any]) -> tuple[str, str, str, str] | None:
+    tag = str(row.get("client_tag") or "").strip().lower()
+    domain = str(row.get("domain") or "").strip().lower()
+    first = str(row.get("first_name_key") or "").strip().lower()
+    last = str(row.get("last_name_key") or "").strip().lower()
+    if not (tag and domain and first and last):
+        return None
+    return (tag, domain, first, last)
+
+
+def _merge_contact(prev: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(prev)
+    for key, val in row.items():
+        if val not in (None, "", [], {}):
+            merged[key] = val
+    return merged
+
+
+def dedupe_contacts_by_person(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per (client_tag, domain, first_name_key, last_name_key)."""
+    seen: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str, str, str]] = []
+    for row in rows:
+        key = _person_key(row)
+        if key is None:
+            continue
+        if key not in seen:
+            order.append(key)
+            seen[key] = dict(row)
+        else:
+            seen[key] = _merge_contact(seen[key], row)
+    return [seen[k] for k in order]
+
+
 def dedupe_contacts_with_email(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: dict[tuple[str, str], dict[str, Any]] = {}
     order: list[tuple[str, str]] = []
@@ -211,8 +247,8 @@ def _omit_nones(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def insert_contacts(client: ClientConfig, rows: list[dict[str, Any]]) -> int:
-    """Insert null-email rows. Do not use ON CONFLICT — email is null."""
-    clean = [_omit_nones(r) for r in rows if not (r.get("email") or "").strip()]
+    """Fallback insert when the person-key unique index is not yet applied."""
+    clean = [_omit_nones(r) for r in rows]
     if not clean:
         return 0
     written = 0
@@ -227,15 +263,68 @@ def insert_contacts(client: ClientConfig, rows: list[dict[str, Any]]) -> int:
     return written
 
 
+def _missing_person_conflict(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in (
+            "on conflict",
+            "no unique",
+            "first_name_key",
+            "last_name_key",
+            "42p10",
+            "42703",
+        )
+    )
+
+
 def upsert_contacts(client: ClientConfig, rows: list[dict[str, Any]]) -> int:
-    """Insert or update contacts. Email rows merge on UNIQUE (domain, email)."""
-    with_email = [_omit_nones(r) for r in dedupe_contacts_with_email(rows)]
-    without = [r for r in rows if not (r.get("email") or "").strip()]
+    """Insert or update contacts.
+
+    Named rows upsert on (client_tag, domain, first_name_key, last_name_key)
+    so a re-run cannot duplicate a null-email person. Email-only rows
+    (no name keys) still merge on UNIQUE (domain, email).
+    """
+    named = [_omit_nones(r) for r in dedupe_contacts_by_person(rows)]
+    named_keys = {_person_key(r) for r in named}
+    leftover = [
+        r
+        for r in rows
+        if _person_key(r) not in named_keys or _person_key(r) is None
+    ]
+    email_only = [_omit_nones(r) for r in dedupe_contacts_with_email(leftover)]
     written = 0
-    if with_email:
-        written += _upsert_contacts_with_email(client, with_email)
-    if without:
-        written += insert_contacts(client, without)
+    if named:
+        try:
+            written += _upsert_contacts_by_person(client, named)
+        except RuntimeError as exc:
+            if not _missing_person_conflict(exc):
+                raise
+            with_email = [r for r in named if (r.get("email") or "").strip()]
+            without = [r for r in named if not (r.get("email") or "").strip()]
+            if with_email:
+                written += _upsert_contacts_with_email(client, with_email)
+            if without:
+                written += insert_contacts(client, without)
+    if email_only:
+        written += _upsert_contacts_with_email(client, email_only)
+    return written
+
+
+def _upsert_contacts_by_person(
+    client: ClientConfig, rows: list[dict[str, Any]]
+) -> int:
+    if not rows:
+        return 0
+    written = 0
+    for batch in _chunks(rows):
+        _request(
+            "POST",
+            f"{client.contacts_table}?on_conflict=client_tag,domain,first_name_key,last_name_key",
+            body=batch,
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+        written += len(batch)
     return written
 
 
@@ -265,7 +354,14 @@ def insert_contacts_ignore_conflict(
 
 def ensure_contact_columns(client: ClientConfig) -> list[str]:
     """Add line_type (and any future contact columns) on {client}_*contacts."""
-    needed = ["line_type"]
+    needed = ["line_type", "first_name_key", "last_name_key"]
+    try:
+        rpc(
+            "ew_ensure_contact_person_key",
+            {"p_table": client.contacts_table},
+        )
+    except Exception:
+        pass
     try:
         rpc(
             "ew_ensure_contact_columns",
@@ -384,5 +480,7 @@ def contact_row(
         "confidence": confidence,
         "place_id": place_id or None,
         "client_tag": client_tag,
+        "first_name_key": (first_name or "").strip().lower() or None,
+        "last_name_key": (last_name or "").strip().lower() or None,
         "updated_at": now,
     }

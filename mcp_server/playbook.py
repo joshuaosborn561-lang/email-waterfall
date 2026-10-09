@@ -45,36 +45,43 @@ Maps-scraper style params, mutually exclusive with `rows`:
 
 ```
 source_table: "client_peterson.email_resolution"
-where: "dl_status is null"
+where: "wf_status is null"
 ```
 
 `source_table` accepts `schema.table`. The server pages 500 rows via a
 security-definer RPC when the schema is not `public` (PostgREST only exposes
-public). Never returns payloads. Writeback (default on) patches `dl_status`,
-`candidate_email`, `dl_provider` on the queue (and `wf_*` when those columns
-exist) so a row is marked after it is processed. Phone hits also write
-`wf_phone` + `wf_phone_type` (Veriphone line type) and `{client}_*contacts.line_type`.
-Existing contact rows are updated on `(domain, email)`, not skipped.
-Resume with `dl_status is null`.
+public). Never returns payloads. Writeback (default on) patches `wf_status` /
+`wf_email` / `wf_email_status` / `wf_vendor` / `wf_updated_at` (and
+`wf_phone` / `wf_phone_type` for phone hits). Never read or write
+`dl_status`, `sg_exclude`, or `skip_*`. Resume with `wf_status is null`.
+Existing contact rows upsert on `(client_tag, domain, first_name_key,
+last_name_key)` so a re-run does not duplicate a null-email person.
 Omitted `map` auto-picks `owner_title` → title, `candidate_email` → email,
 and `phone` / `cellphone` / `wf_phone` → phone.
 
 `verify_only=true` runs Veriphone on numbers already on the row and writes
 the verdict. Finder HTTP is skipped — use this to classify numbers you
-already have without paying AI Ark / LeadMagic again.
+already have without paying later paid finders again.
 
 ## Name + company (no domain)
 Rows with first_name + last_name + company_name and no domain are tagged
 `mode=name_company`. GetLeads uses `getleads_enrich_person_batch` (no LinkedIn
-tool). Smartlead is skipped (needs a domain). Then AI Ark → LeadMagic →
-Prospeo → FullEnrich. `company_name` is sent to FullEnrich verbatim. When a
+tool). Smartlead is skipped (needs a domain). Then AI Ark → Prospeo →
+FullEnrich. `company_name` is sent to FullEnrich verbatim. When a
 tier returns an email, its domain is written back for later tiers.
 
 ## Tiers
 getleads (OAuth MCP) → Smartlead (included plan email finder) → AI Ark →
-LeadMagic → Prospeo → FullEnrich.
-Default max_tier is **leadmagic** (alias `lm`). Prospeo and FullEnrich do not
-run unless you raise max_tier.
+Prospeo → FullEnrich.
+Default max_tier is **prospeo**. FullEnrich does not run unless you raise
+max_tier. Legacy LeadMagic names (`leadmagic`, `lm`, `lead_magic`) in
+`max_tier` / `skip_tiers` are accepted as no-ops with a warning; a legacy
+`max_tier=leadmagic` maps to the old AI Ark ceiling (stop before Prospeo).
+
+`approve_cost_usd` defaults to **$5** on `enrich_waterfall` and **$0.25** on
+`enrich_person` / `POST /enrich-one`. The job estimates first and refuses
+when the quote exceeds the ceiling (`status=refused_over_ceiling`). A run
+that would go over mid-job stops with `status=stopped_at_ceiling`.
 
 getleads is first. `GETLEADS_API_KEY` is a Bearer on the GetLeads MCP
 (`https://app.getleads.io/api/mcp`). OAuth refresh tokens also work
@@ -99,11 +106,11 @@ AI Ark is fully used on all three lanes (not people-only):
   `POST /v2/people/export/single`
 - cellphone: LinkedIn URL or name+domain → `POST /v2/people/mobile-phone-finder`
 
-Cellphones also fall through to LeadMagic mobile-finder, then Prospeo, then
-FullEnrich `contact.phones` if max_tier allows. Input `phone` / `cellphone` /
-`mobile` is written as cellphone
-except on need='phone': those runs also call Veriphone `GET /v2/verify` and
-keep the number only when `phone_type` is `mobile`.
+Cellphones fall through AI Ark → Prospeo → FullEnrich `contact.phones` if
+max_tier allows. Vendor-found numbers are Veriphone-checked (`phone_valid`
+and `phone_type=mobile`) before they are accepted. Input `phone` /
+`cellphone` / `mobile` is written as cellphone except on need='phone':
+those runs also Veriphone-check the input and keep it only when it is mobile.
 
 `need` is an allowlist of what may be *requested from vendors*, applied before
 any HTTP call. It is independent of `max_tier` (depth).
@@ -119,9 +126,9 @@ any HTTP call. It is independent of `max_tier` (depth).
 Optional `find_people` / `find_email` / `find_phone` override `need` when any
 is passed. Phone is off unless `find_phone=true` or need is `both` / `phone`.
 
-need='email' / find_phone=false skips AI Ark mobile-phone-finder, LeadMagic
-mobile-finder, Prospeo enrich_mobile, FullEnrich contact.phones, and Veriphone
-entirely — do not call and discard. Job results include `suppressed_by_need` counts and
+need='email' / find_phone=false skips AI Ark mobile-phone-finder, Prospeo
+enrich_mobile, FullEnrich contact.phones, and Veriphone entirely — do not
+call and discard. Job results include `suppressed_by_need` counts and
 `estimate_only` quotes the email-only AI Ark rate (1.0, not 1.5).
 AI Ark People Search then export/single is one attempt and two vendor_calls.
 

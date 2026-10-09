@@ -96,10 +96,10 @@ def test_coerce_source_and_source_table_both_table_names() -> None:
     assert table_source.coerce_source(
         "client_peterson.email_resolution",
         source_table="client_peterson.email_resolution",
-        where="dl_status is null",
+        where="wf_status is null",
     ) == {
         "table": "client_peterson.email_resolution",
-        "where": "dl_status is null",
+        "where": "wf_status is null",
     }
 
 
@@ -107,11 +107,11 @@ def test_coerce_source_table_object() -> None:
     assert table_source.coerce_source(
         source_table={
             "table": "client_peterson.email_resolution",
-            "where": "dl_status is null",
+            "where": "wf_status is null",
         }
     ) == {
         "table": "client_peterson.email_resolution",
-        "where": "dl_status is null",
+        "where": "wf_status is null",
     }
 
 
@@ -149,7 +149,7 @@ def test_empty_rows_do_not_block_source_table(monkeypatch) -> None:
         need="email",
         source={},
         source_table="client_peterson.email_resolution",
-        where="dl_status is null",
+        where="wf_status is null",
         estimate_only=True,
         write_supabase=False,
     )
@@ -213,7 +213,7 @@ def test_source_string_table_name_reaches_fetch(monkeypatch) -> None:
         need="email",
         source="client_peterson.email_resolution",
         source_table=None,
-        where="dl_status is null",
+        where="wf_status is null",
         estimate_only=True,
         write_supabase=False,
     )
@@ -346,17 +346,17 @@ def test_writeback_patches_wf_columns(monkeypatch) -> None:
         status="found",
         email="jane@org.org",
         email_status="found",
-        vendor="leadmagic",
+        vendor="prospeo",
     )
     assert calls[0][0] == "PATCH"
     assert "id=eq.42" in calls[0][1]
     body = calls[0][2]
     assert body["wf_email"] == "jane@org.org"
     assert body["wf_status"] == "found"
-    assert body["wf_vendor"] == "leadmagic"
-    assert body["dl_status"] == "found"
-    assert body["candidate_email"] == "jane@org.org"
-    assert body["dl_provider"] == "leadmagic"
+    assert body["wf_vendor"] == "prospeo"
+    assert "dl_status" not in body
+    assert "candidate_email" not in body
+    assert "dl_provider" not in body
     assert "wf_updated_at" in body
     assert "wf_phone" not in body
 
@@ -390,7 +390,7 @@ def test_writeback_patches_wf_phone_and_type(monkeypatch) -> None:
     assert body["wf_status"] == "found"
 
 
-def test_writeback_dl_status_without_wf_columns(monkeypatch) -> None:
+def test_writeback_skips_when_only_forbidden_columns_present(monkeypatch) -> None:
     src = table_source.parse_source(
         {"table": "client_peterson.email_resolution"}
     )
@@ -411,25 +411,29 @@ def test_writeback_dl_status_without_wf_columns(monkeypatch) -> None:
         email_status="not_found",
         vendor="smartlead",
     )
-    assert calls[0][0] == "rpc/ew_patch_source"
-    fields = calls[0][1]["p_fields"]
-    assert fields["dl_status"] == "not_found"
-    assert fields["dl_provider"] == "smartlead"
-    assert "wf_status" not in fields
+    assert calls == []
+
+
+def test_where_rejects_forbidden_columns() -> None:
+    with pytest.raises(ValueError, match="dl_status"):
+        table_source.where_to_filters("dl_status is null")
+    with pytest.raises(ValueError, match="sg_exclude"):
+        table_source.where_to_filters("sg_exclude = '1'")
+    with pytest.raises(ValueError, match="skip_"):
+        table_source.where_to_filters("skip_email is null")
 
 
 def test_source_enrich_writes_back(monkeypatch) -> None:
     from tests.test_waterfall import _patch_clients, _patch_writes, _vendor
 
     sink: dict = {}
-    lm = _vendor(
-        email=EmailHit(email="jane@org.org", source_tier="leadmagic", status="valid")
+    ark = _vendor(
+        email=EmailHit(email="jane@org.org", source_tier="aiark", status="valid")
     )
     _patch_clients(
         monkeypatch,
         gl=_vendor(enabled=True),
-        ark=_vendor(email=None),
-        lm=lm,
+        ark=ark,
         fe=_vendor(enabled=False),
     )
     _patch_writes(monkeypatch, sink)
@@ -456,7 +460,7 @@ def test_source_enrich_writes_back(monkeypatch) -> None:
     out = waterfall.enrich_waterfall(
         client_tag="peterson",
         need="email",
-        max_tier="leadmagic",
+        max_tier="aiark",
         write_supabase=True,
         source={
             "project_id": "kemvxzhcxvynmoutwdrh",
@@ -474,4 +478,4 @@ def test_source_enrich_writes_back(monkeypatch) -> None:
     assert "items" not in out and "rows" not in out
     assert writebacks[0]["key"] == 9
     assert writebacks[0]["email"] == "jane@org.org"
-    assert writebacks[0]["vendor"] == "leadmagic"
+    assert writebacks[0]["vendor"] == "aiark"

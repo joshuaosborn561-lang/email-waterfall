@@ -62,12 +62,11 @@ def test_one_row_through_each_tier_fails_if_every_call_errors(monkeypatch) -> No
     mcp = FakeMcp(result={"status": "not_found"}, tools=[LINKEDIN_BATCH_TOOL])
     gl = GetLeadsClient(token_manager=Tok(), mcp=mcp, tools=[LINKEDIN_BATCH_TOOL])
     ark = CountingVendor()
-    lm = CountingVendor()
     sl = CountingVendor()
     prospeo = CountingVendor()
     fe = CountingVendor()
     _patch_clients(
-        monkeypatch, gl=gl, ark=ark, lm=lm, fe=fe, prospeo=prospeo, smartlead=sl
+        monkeypatch, gl=gl, ark=ark, fe=fe, prospeo=prospeo, smartlead=sl
     )
     _patch_writes(monkeypatch, {})
 
@@ -92,7 +91,7 @@ def test_one_row_through_each_tier_fails_if_every_call_errors(monkeypatch) -> No
     assert isinstance(mcp.calls[0][1].get("items"), list)
     assert gl.errors == 0
     assert gl.calls == 1
-    for vendor in (ark, lm, sl, prospeo, fe):
+    for vendor in (ark, sl, prospeo, fe):
         assert vendor.calls >= 1
         assert vendor.errors == 0
 
@@ -122,7 +121,7 @@ def test_one_row_without_linkedin_skips_linkedin_batch(monkeypatch) -> None:
         ],
         client_tag="peterson",
         need="email",
-        max_tier="leadmagic",
+        max_tier="aiark",
         write_supabase=True,
     )
     assert mcp.calls

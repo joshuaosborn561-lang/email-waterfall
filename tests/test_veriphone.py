@@ -173,9 +173,9 @@ def test_need_phone_drops_landline_and_tries_next_vendor(monkeypatch) -> None:
     ark.find_mobile.return_value = PhoneHit(
         phone="+12025550100", source_tier="aiark"
     )
-    lm = _vendor(enabled=True)
-    lm.find_mobile.return_value = PhoneHit(
-        phone="+19725550199", source_tier="leadmagic"
+    prospeo = _vendor(enabled=True)
+    prospeo.find_mobile.return_value = PhoneHit(
+        phone="+19725550199", source_tier="prospeo"
     )
 
     def verify(phone, **kwargs):
@@ -201,8 +201,8 @@ def test_need_phone_drops_landline_and_tries_next_vendor(monkeypatch) -> None:
         monkeypatch,
         gl=_vendor(email=None),
         ark=ark,
-        lm=lm,
         fe=_vendor(enabled=False),
+        prospeo=prospeo,
         veriphone=vp,
     )
     _patch_writes(monkeypatch, sink)
@@ -225,7 +225,7 @@ def test_need_phone_drops_landline_and_tries_next_vendor(monkeypatch) -> None:
     assert sink["contacts"][0]["cellphone"] == "+19725550199"
     assert sink["contacts"][0]["line_type"] == "mobile"
     ark.find_mobile.assert_called()
-    lm.find_mobile.assert_called()
+    prospeo.find_mobile.assert_called()
 
 
 def test_need_phone_rejects_input_landline(monkeypatch) -> None:
@@ -264,18 +264,17 @@ def test_need_phone_rejects_input_landline(monkeypatch) -> None:
     ark.find_mobile.assert_called()
 
 
-def test_need_both_skips_veriphone(monkeypatch) -> None:
+def test_need_both_verifies_vendor_mobile(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))
     ark.find_mobile.return_value = PhoneHit(
         phone="+12015550100", source_tier="aiark"
     )
-    vp = _veriphone(mobile=False)
+    vp = _veriphone(mobile=True, e164="+12015550100")
     _patch_clients(
         monkeypatch,
         gl=_vendor(email=None),
         ark=ark,
-        lm=_vendor(enabled=True),
         fe=_vendor(enabled=False),
         veriphone=vp,
     )
@@ -295,8 +294,7 @@ def test_need_both_skips_veriphone(monkeypatch) -> None:
     )
     assert out["phones_found"] == 1
     assert sink["contacts"][0]["cellphone"] == "+12015550100"
-    vp.verify.assert_not_called()
-    vp.check_mobile.assert_not_called()
+    vp.verify.assert_called()
 
 
 def test_need_phone_unconfigured_keeps_number_and_warns(monkeypatch) -> None:

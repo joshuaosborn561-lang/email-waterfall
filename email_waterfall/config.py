@@ -30,7 +30,6 @@ class Settings:
     getleads_refresh_token: str
     getleads_api_key: str
     ai_ark_api_key: str
-    leadmagic_api_key: str
     prospeo_api_key: str
     fullenrich_api_key: str
     veriphone_api_key: str
@@ -61,7 +60,6 @@ def load_settings() -> Settings:
         getleads_refresh_token=_env("GETLEADS_REFRESH_TOKEN"),
         getleads_api_key=_env("GETLEADS_API_KEY") or _env("GETLEADS_KEY"),
         ai_ark_api_key=_env("AI_ARK_API_KEY") or _env("AIARK_API_KEY"),
-        leadmagic_api_key=_env("LEADMAGIC_API_KEY") or _env("LEADMAGIC_KEY"),
         prospeo_api_key=_env("PROSPEO_API_KEY"),
         fullenrich_api_key=_env("FULLENRICH_API_KEY"),
         veriphone_api_key=_env("VERIPHONE_API_KEY") or _env("VERIPHONE_KEY"),

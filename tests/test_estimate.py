@@ -51,7 +51,6 @@ def test_estimate_only_name_company_no_spend(monkeypatch) -> None:
     assert out["tiers_by_mode"]["name_company"] == [
         "getleads",
         "aiark",
-        "leadmagic",
         "prospeo",
         "fullenrich",
     ]
@@ -63,9 +62,9 @@ def test_estimate_only_name_company_no_spend(monkeypatch) -> None:
     assert out["estimate"]["aiark"]["rate_note"] == "email-only"
     assert out["need_capabilities"] == ["email"]
     assert out["suppressed_by_need"]["aiark_phone"] == 956
-    assert out["suppressed_by_need"]["leadmagic_phone"] == 956
     assert out["suppressed_by_need"]["prospeo_phone"] == 956
-    assert out["estimate"]["leadmagic"]["credits_est"] == 956.0
+    assert "leadmagic_phone" not in out["suppressed_by_need"]
+    assert "leadmagic" not in out["estimate"]
     assert out["estimate"]["prospeo"]["credits_est"] == 956.0
     assert out["estimate"]["fullenrich"]["credits_est"] == 956.0
     assert out["spend"] == 0
@@ -133,7 +132,7 @@ def test_estimate_only_both_quotes_aiark_email_plus_phone(monkeypatch) -> None:
         ],
         client_tag="peterson",
         need="both",
-        max_tier="leadmagic",
+        max_tier="aiark",
         estimate_only=True,
         write_supabase=False,
     )
@@ -160,7 +159,7 @@ def test_estimate_only_find_phone_false_excludes_phone_credits(monkeypatch) -> N
         find_people=True,
         find_email=True,
         find_phone=False,
-        max_tier="leadmagic",
+        max_tier="aiark",
         estimate_only=True,
         write_supabase=False,
     )
@@ -170,7 +169,7 @@ def test_estimate_only_find_phone_false_excludes_phone_credits(monkeypatch) -> N
     assert out["estimate"]["aiark"]["credits_est"] == 1.0
     assert out["estimate"]["aiark"]["rate_note"] == "email-only"
     assert "aiark_phone" in out["suppressed_by_need"]
-    assert "leadmagic_phone" in out["suppressed_by_need"]
+    assert "leadmagic_phone" not in out["suppressed_by_need"]
     assert "prospeo_phone" in out["suppressed_by_need"]
     assert "veriphone_phone" in out["suppressed_by_need"]
 
@@ -188,7 +187,7 @@ def test_estimate_only_domain_rows_include_early_tiers(monkeypatch) -> None:
         ],
         client_tag="peterson",
         need="email",
-        max_tier="leadmagic",
+        max_tier="aiark",
         estimate_only=True,
         write_supabase=False,
     )
@@ -197,7 +196,6 @@ def test_estimate_only_domain_rows_include_early_tiers(monkeypatch) -> None:
         "getleads",
         "smartlead",
         "aiark",
-        "leadmagic",
     ]
     assert out["estimate"]["getleads"]["rows"] == 1
     assert out["spend"] == 0

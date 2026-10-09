@@ -47,22 +47,17 @@ def test_health_getleads_is_oauth_snapshot() -> None:
     assert data["vendors"]["veriphone"] is False
     assert data["ok"] is True
     assert data["reason"] is None
-    assert data["vendors"]["leadmagic"]["configured"] is False
-    assert data["vendors"]["leadmagic"]["credits_remaining"] is None
+    assert "leadmagic" not in data["vendors"]
     assert data["vendors"]["aiark"]["configured"] is False
     assert data["vendors"]["aiark"]["credits_remaining"] is None
+    assert data["max_tier_default"] == "prospeo"
+    assert data["approve_cost_usd_default"] == 5.0
 
 
 def test_health_low_paid_credits_sets_ok_false(monkeypatch) -> None:
     import json
 
     from mcp_server import server as srv
-
-    class LowLM:
-        enabled = True
-
-        def credits(self):
-            return {"credits": 0}
 
     class LowArk:
         enabled = True
@@ -71,18 +66,13 @@ def test_health_low_paid_credits_sets_ok_false(monkeypatch) -> None:
             return {"total": 12}
 
     monkeypatch.setattr(
-        "email_waterfall.vendors.leadmagic.LeadMagicClient",
-        lambda *a, **k: LowLM(),
-    )
-    monkeypatch.setattr(
         "email_waterfall.vendors.ai_ark.AiArkClient",
         lambda *a, **k: LowArk(),
     )
     data = json.loads(srv.health())
     assert data["ok"] is False
-    assert data["vendors"]["leadmagic"]["credits_remaining"] == 0
     assert data["vendors"]["aiark"]["credits_remaining"] == 12
-    assert "leadmagic" in data["reason"]
+    assert "leadmagic" not in data["vendors"]
     assert "aiark" in data["reason"]
     assert data["paid_credit_floor"] == 50
 
@@ -92,12 +82,6 @@ def test_health_paid_credits_above_floor_ok(monkeypatch) -> None:
 
     from mcp_server import server as srv
 
-    class OkLM:
-        enabled = True
-
-        def credits(self):
-            return {"credits": 80}
-
     class OkArk:
         enabled = True
 
@@ -105,17 +89,13 @@ def test_health_paid_credits_above_floor_ok(monkeypatch) -> None:
             return {"total": 200}
 
     monkeypatch.setattr(
-        "email_waterfall.vendors.leadmagic.LeadMagicClient",
-        lambda *a, **k: OkLM(),
-    )
-    monkeypatch.setattr(
         "email_waterfall.vendors.ai_ark.AiArkClient",
         lambda *a, **k: OkArk(),
     )
     data = json.loads(srv.health())
     assert data["ok"] is True
     assert data["reason"] is None
-    assert data["vendors"]["leadmagic"]["credits_remaining"] == 80
+    assert "leadmagic" not in data["vendors"]
     assert data["vendors"]["aiark"]["credits_remaining"] == 200
 
 
@@ -138,6 +118,10 @@ def test_enrich_waterfall_has_source_and_estimate_only() -> None:
     assert "find_email" in params
     assert "find_phone" in params
     assert params["find_phone"].default is None
+    assert "approve_cost_usd" in params
+    assert params["approve_cost_usd"].default == 5.0
+    assert params["max_tier"].default == "prospeo"
+    assert "skip_tiers" in params
 
 
 def _schema_types(prop: dict) -> set[str]:
@@ -177,7 +161,7 @@ def test_mcp_accepts_table_source_shapes() -> None:
             "client_tag": "peterson",
             "estimate_only": True,
             "source_table": "client_peterson.email_resolution",
-            "where": "dl_status is null",
+            "where": "wf_status is null",
             "source": None,
         }
     )
@@ -196,7 +180,7 @@ def test_mcp_accepts_table_source_shapes() -> None:
             "estimate_only": True,
             "source_table": {
                 "table": "client_peterson.email_resolution",
-                "where": "dl_status is null",
+                "where": "wf_status is null",
             },
         }
     )

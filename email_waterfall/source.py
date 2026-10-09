@@ -23,13 +23,14 @@ WRITEBACK_COLUMNS = (
     "wf_phone",
     "wf_phone_type",
 )
-QUEUE_WRITE_COLUMNS = (
-    "dl_status",
-    "candidate_email",
-    "dl_provider",
-    "dl_pattern",
+ALL_WRITEBACK_COLUMNS = WRITEBACK_COLUMNS
+FORBIDDEN_COLUMNS = frozenset(
+    {
+        "dl_status",
+        "sg_exclude",
+    }
 )
-ALL_WRITEBACK_COLUMNS = WRITEBACK_COLUMNS + QUEUE_WRITE_COLUMNS
+_SKIP_COL = re.compile(r"^skip_", re.I)
 REQUIRED_MAP_FIELDS = ("first_name", "last_name", "company_name")
 OPTIONAL_MAP_FIELDS = (
     "domain",
@@ -120,6 +121,7 @@ def parse_source(raw: Any) -> TableSource:
         col = str(mapping_in.get(field_name) or field_name).strip()
         if not col or not _IDENT.match(col):
             raise ValueError(f"source.map.{field_name} is required (identifier)")
+        _reject_forbidden_column(col)
         column_map[field_name] = col
     for field_name in OPTIONAL_MAP_FIELDS:
         if field_name not in mapping_in:
@@ -129,6 +131,7 @@ def parse_source(raw: Any) -> TableSource:
             continue
         if not _IDENT.match(col):
             raise ValueError(f"source.map.{field_name} must be an identifier")
+        _reject_forbidden_column(col)
         column_map[field_name] = col
     limit = raw.get("limit")
     if limit is not None:
@@ -329,6 +332,15 @@ def resolve_credentials(project_id: str) -> tuple[str, str]:
     )
 
 
+def _reject_forbidden_column(name: str) -> None:
+    col = (name or "").strip()
+    if col.lower() in FORBIDDEN_COLUMNS or _SKIP_COL.match(col):
+        raise ValueError(
+            f"never read or write {col!r} (dl_status / sg_exclude / skip_*). "
+            "Resume with wf_status is null."
+        )
+
+
 def where_to_filters(where: str) -> list[tuple[str, str]]:
     """Translate a small SQL predicate subset into PostgREST filters."""
     text = (where or "").strip()
@@ -347,6 +359,7 @@ def where_to_filters(where: str) -> list[tuple[str, str]]:
                 "\"wf_status is null\" or \"list_id = 'x'\""
             )
         col = m.group("col")
+        _reject_forbidden_column(col)
         if m.group("null"):
             null_op = m.group("null").lower()
             out.append((col, "is.null" if null_op == "is null" else "not.is.null"))
@@ -535,22 +548,13 @@ def existing_columns(src: TableSource) -> set[str]:
 def ensure_writeback_columns(src: TableSource) -> list[str]:
     """Add wf_* columns when writeback=true and they are missing.
 
-    Native queue columns (dl_status, candidate_email, …) are never created
-    here — they already exist on email_resolution. If those are present,
-    writeback can proceed even when wf_* cannot be added.
+    Never creates or writes dl_status / sg_exclude / skip_* columns.
     """
     present = existing_columns(src)
     needed = [c for c in WRITEBACK_COLUMNS if c not in present]
     if not needed:
         return []
-    has_queue = any(col in present for col in ("dl_status", "candidate_email"))
-    try:
-        added = _add_wf_columns(src, needed)
-        return added
-    except RuntimeError:
-        if has_queue:
-            return []
-        raise
+    return _add_wf_columns(src, needed)
 
 
 def _add_wf_columns(src: TableSource, needed: list[str]) -> list[str]:
@@ -622,9 +626,6 @@ def writeback_result(
         "wf_email_status": email_status or None,
         "wf_vendor": vendor_n,
         "wf_updated_at": datetime.now(timezone.utc).isoformat(),
-        "dl_status": status_n,
-        "candidate_email": email_n,
-        "dl_provider": vendor_n,
     }
     if phone_n or phone_type_n:
         body["wf_phone"] = phone_n

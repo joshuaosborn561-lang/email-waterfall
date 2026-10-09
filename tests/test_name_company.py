@@ -5,23 +5,20 @@ from __future__ import annotations
 from email_waterfall import waterfall
 from email_waterfall.vendors.base import EmailHit
 from email_waterfall.vendors.fullenrich import FullEnrichClient
-from email_waterfall.vendors.leadmagic import LeadMagicClient
 from tests.test_waterfall import _patch_clients, _patch_writes, _vendor
 
 
 def test_name_company_not_rejected(monkeypatch) -> None:
     sink: dict = {}
-    lm = _vendor(
-        email=EmailHit(email="jane@helpinghands.org", source_tier="leadmagic")
+    ark = _vendor(
+        email=EmailHit(email="jane@helpinghands.org", source_tier="aiark")
     )
     gl = _vendor(enabled=True)
     sl = _vendor(enabled=True)
-    ark = _vendor(email=None)
     _patch_clients(
         monkeypatch,
         gl=gl,
         ark=ark,
-        lm=lm,
         fe=_vendor(enabled=False),
         smartlead=sl,
     )
@@ -37,7 +34,7 @@ def test_name_company_not_rejected(monkeypatch) -> None:
         ],
         client_tag="peterson",
         need="email",
-        max_tier="leadmagic",
+        max_tier="aiark",
         write_supabase=True,
     )
     assert out["rows_in"] == 1
@@ -46,18 +43,14 @@ def test_name_company_not_rejected(monkeypatch) -> None:
     gl.find_email.assert_called()
     sl.find_email.assert_not_called()
     ark.find_email.assert_called()
-    lm.find_email.assert_called()
-    args, kwargs = lm.find_email.call_args
+    args, kwargs = ark.find_email.call_args
     assert args[0] == "Jane"
     assert args[1] == "Doe"
-    assert args[2] == ""
-    assert args[3] == "Helping Hands Inc"
 
 
 def test_name_company_fills_domain_for_later_tiers(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(email=None)
-    lm = _vendor(email=None)
     prospeo = _vendor(
         email=EmailHit(
             email="jane@helpinghands.org",
@@ -70,7 +63,6 @@ def test_name_company_fills_domain_for_later_tiers(monkeypatch) -> None:
         monkeypatch,
         gl=_vendor(enabled=True),
         ark=ark,
-        lm=lm,
         fe=fe,
         prospeo=prospeo,
     )
@@ -93,22 +85,6 @@ def test_name_company_fills_domain_for_later_tiers(monkeypatch) -> None:
     assert sink["companies"][0]["domain"] == "helpinghands.org"
     fe.find_email.assert_not_called()
     fe.find_email_bulk.assert_not_called()
-
-
-def test_leadmagic_accepts_name_and_company(monkeypatch) -> None:
-    client = LeadMagicClient(api_key="lm_test")
-    posts: list[tuple[str, dict]] = []
-
-    def fake_post(path, body):
-        posts.append((path, body))
-        return {"email": "jane@org.org", "status": "valid"}
-
-    monkeypatch.setattr(client, "_post", fake_post)
-    hit = client.find_email("Jane", "Doe", "", "Helping Hands Inc")
-    assert hit is not None
-    assert hit.email == "jane@org.org"
-    assert posts[0][1]["company_name"] == "Helping Hands Inc"
-    assert "domain" not in posts[0][1]
 
 
 def test_fullenrich_company_name_is_verbatim(monkeypatch) -> None:

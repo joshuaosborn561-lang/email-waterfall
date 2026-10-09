@@ -12,6 +12,7 @@ from email_waterfall.need import (
     CAP_PHONE,
     assert_capability,
     capabilities,
+    credit_per_row,
     normalize_need,
     set_need,
 )
@@ -22,10 +23,14 @@ from email_waterfall.vendors.veriphone import VeriphoneResult
 from email_waterfall._wf.const import (
     CIRCUIT_ERROR_LIMIT,
     CIRCUIT_WINDOW,
+    CREDIT_PER_ATTEMPT,
+    DEFAULT_APPROVE_COST_USD,
     DEFAULT_MAX_TIER,
     _empty_stats,
     _fill_row_domain,
+    attempt_cost_usd,
     normalize_max_tier,
+    resolve_approve_cost_usd,
     tier_allowed,
 )
 
@@ -50,7 +55,6 @@ class Waterfall:
         getleads: Any = None,
         smartlead: Any = None,
         ai_ark: Any = None,
-        leadmagic: Any = None,
         prospeo: Any = None,
         fullenrich: Any = None,
         veriphone: Any = None,
@@ -61,16 +65,23 @@ class Waterfall:
         need: str = "both",
         verify_only: bool = False,
         caps: frozenset[str] | None = None,
+        skip_tiers: set[str] | None = None,
+        approve_cost_usd: float | None = None,
     ):
         h = _host()
         self.getleads = getleads or h.GetLeadsClient()
         self.smartlead = smartlead or h.SmartleadClient()
         self.ai_ark = ai_ark or h.AiArkClient()
-        self.leadmagic = leadmagic or h.LeadMagicClient()
         self.prospeo = prospeo or h.ProspeoClient()
         self.fullenrich = fullenrich or h.FullEnrichClient()
         self.veriphone = veriphone or h.VeriphoneClient()
         self.max_tier = normalize_max_tier(max_tier)
+        self.skip_tiers = set(skip_tiers or ())
+        self.approve_cost_usd = resolve_approve_cost_usd(
+            approve_cost_usd, default=DEFAULT_APPROVE_COST_USD
+        )
+        self.spend_usd = 0.0
+        self.stopped_at_ceiling = False
         if caps is None:
             self.need = normalize_need(need)
             self.caps = capabilities(self.need)
@@ -85,7 +96,6 @@ class Waterfall:
             "aiark": _empty_stats(),
             "getleads": _empty_stats(),
             "smartlead": _empty_stats(),
-            "leadmagic": _empty_stats(),
             "prospeo": _empty_stats(),
             "fullenrich": _empty_stats(),
             "veriphone": _empty_stats(),
@@ -109,19 +119,38 @@ class Waterfall:
             self.tier_stats.setdefault(tier, _empty_stats())
             self.tier_stats[tier][field] = self.tier_stats[tier].get(field, 0) + 1
 
-    def _bump_attempt(self, tier: str, row: dict[str, Any]) -> None:
+    def _bump_attempt(self, tier: str, row: dict[str, Any]) -> bool:
         """One attempt per row per tier. Extra HTTP is vendor_calls, not attempts.
 
         AI Ark name+domain email is People Search then export/single: 1 attempt,
         2 vendor_calls. Email + phone on the same row is still 1 attempt.
+        Returns False when the cost ceiling would be exceeded (job stops).
         """
         key = (tier, id(row))
+        credits = credit_per_row(
+            tier, self.need, CREDIT_PER_ATTEMPT.get(tier, 1.0), self.caps
+        )
+        cost = attempt_cost_usd(tier, credits=credits)
         with self._lock:
             if key in self._row_attempts:
-                return
+                return True
+            if self.stopped_at_ceiling:
+                return False
+            if cost > 0 and self.spend_usd + cost > self.approve_cost_usd:
+                self.stopped_at_ceiling = True
+                log.warning(
+                    "stopped_at_ceiling spend=%.4f next=%s cost=%.4f ceiling=%.4f",
+                    self.spend_usd,
+                    tier,
+                    cost,
+                    self.approve_cost_usd,
+                )
+                return False
             self._row_attempts.add(key)
+            self.spend_usd = round(self.spend_usd + cost, 6)
             self.tier_stats.setdefault(tier, _empty_stats())
             self.tier_stats[tier]["calls"] = self.tier_stats[tier].get("calls", 0) + 1
+            return True
 
     def _suppress(self, key: str) -> None:
         with self._lock:
@@ -131,9 +160,11 @@ class Waterfall:
         set_need(self.need, self.caps)
 
     def _allowed(self, tier: str) -> bool:
+        if self.stopped_at_ceiling:
+            return False
         if tier in self._circuit_disabled:
             return False
-        return tier_allowed(tier, self.max_tier)
+        return tier_allowed(tier, self.max_tier, self.skip_tiers)
 
     def _note_circuit(self, tier: str, errored: bool) -> None:
         """Disable a tier after more than 20 errors in its first 25 calls."""
@@ -225,9 +256,9 @@ class Waterfall:
             and has_name_domain
             and self.smartlead.enabled
             and self._allowed("smartlead")
+            and self._bump_attempt("smartlead", row)
         ):
             before_e = _int_attr(self.smartlead, "errors")
-            self._bump_attempt("smartlead", row)
             hit = self.smartlead.find_email(first, last, domain, company)
             self._note_circuit(
                 "smartlead", _int_attr(self.smartlead, "errors") > before_e
@@ -235,9 +266,14 @@ class Waterfall:
             if hit:
                 self._bump("smartlead", "email_hits")
 
-        if not hit and can_aiark and self.ai_ark.enabled and self._allowed("aiark"):
+        if (
+            not hit
+            and can_aiark
+            and self.ai_ark.enabled
+            and self._allowed("aiark")
+            and self._bump_attempt("aiark", row)
+        ):
             before_e = _int_attr(self.ai_ark, "errors")
-            self._bump_attempt("aiark", row)
             hit = self.ai_ark.find_email(
                 first,
                 last,
@@ -254,27 +290,15 @@ class Waterfall:
                 _fill_row_domain(row, email=hit.email, raw=hit.raw)
                 domain = row.get("domain") or domain
 
+        can_prospeo = bool(linkedin or has_name_domain or has_name_company)
         if (
             not hit
-            and (has_name_domain or has_name_company)
-            and self.leadmagic.enabled
-            and self._allowed("leadmagic")
+            and can_prospeo
+            and self.prospeo.enabled
+            and self._allowed("prospeo")
+            and self._bump_attempt("prospeo", row)
         ):
-            before_e = _int_attr(self.leadmagic, "errors")
-            self._bump_attempt("leadmagic", row)
-            hit = self.leadmagic.find_email(first, last, domain, company)
-            self._note_circuit(
-                "leadmagic", _int_attr(self.leadmagic, "errors") > before_e
-            )
-            if hit:
-                self._bump("leadmagic", "email_hits")
-                _fill_row_domain(row, email=hit.email, raw=hit.raw)
-                domain = row.get("domain") or domain
-
-        can_prospeo = bool(linkedin or has_name_domain or has_name_company)
-        if not hit and can_prospeo and self.prospeo.enabled and self._allowed("prospeo"):
             before_e = _int_attr(self.prospeo, "errors")
-            self._bump_attempt("prospeo", row)
             hit = self.prospeo.find_email(
                 first,
                 last,
@@ -297,9 +321,9 @@ class Waterfall:
             and (has_name_domain or has_name_company)
             and self.fullenrich.enabled
             and self._allowed("fullenrich")
+            and self._bump_attempt("fullenrich", row)
         ):
             before_e = _int_attr(self.fullenrich, "errors")
-            self._bump_attempt("fullenrich", row)
             hit = self.fullenrich.find_email(first, last, domain, company)
             self._note_circuit(
                 "fullenrich", _int_attr(self.fullenrich, "errors") > before_e
@@ -376,8 +400,6 @@ class Waterfall:
             vendors.append(("getleads", self.getleads))
         if self.ai_ark.enabled and self._allowed("aiark"):
             vendors.append(("aiark", self.ai_ark))
-        if domain and self.leadmagic.enabled and self._allowed("leadmagic"):
-            vendors.append(("leadmagic", self.leadmagic))
 
         vendor_best: PersonHit | None = None
         vendor_rank = -1
@@ -386,8 +408,9 @@ class Waterfall:
         for tier, client in vendors:
             if not self._allowed(tier):
                 continue
+            if not self._bump_attempt(tier, row):
+                continue
             before_e = _int_attr(client, "errors")
-            self._bump_attempt(tier, row)
             if domain:
                 people = client.find_people(
                     domain,
@@ -435,14 +458,14 @@ class Waterfall:
         domain = row.get("domain") or ""
         full = (row.get("full_name") or f"{first} {last}".strip()).strip()
         can_aiark = bool(linkedin or (domain and full))
-        can_lm = bool(linkedin or work_email)
         can_prospeo = bool(linkedin or (first and last and domain))
         can_fe = bool(
             (first and last and (domain or row.get("company_name") or linkedin))
         )
         return {
-            "aiark": can_aiark and self.ai_ark.enabled and self._allowed("aiark"),
-            "leadmagic": can_lm and self.leadmagic.enabled and self._allowed("leadmagic"),
+            "aiark": can_aiark
+            and self.ai_ark.enabled
+            and self._allowed("aiark"),
             "prospeo": can_prospeo
             and self.prospeo.enabled
             and self._allowed("prospeo"),
@@ -495,12 +518,13 @@ class Waterfall:
         *,
         source_tier: str,
         raw: dict[str, Any] | None = None,
+        require_verify: bool = False,
     ) -> PhoneHit | None:
-        """On need='phone' (or verify_only), keep the number only when mobile."""
+        """Keep a number only when Veriphone says valid + mobile (when required)."""
         number = (phone or "").strip()
         if not number:
             return None
-        if not self._should_verify_phone():
+        if not require_verify and not self._should_verify_phone():
             return PhoneHit(phone=number, source_tier=source_tier, raw=raw or {})
 
         if not self.veriphone.enabled:
@@ -559,9 +583,8 @@ class Waterfall:
                 return self._phone_cache[cache_key]
 
         hit: PhoneHit | None = None
-        if eligible.get("aiark"):
+        if eligible.get("aiark") and self._allowed("aiark") and self._bump_attempt("aiark", row):
             before_e = _int_attr(self.ai_ark, "errors")
-            self._bump_attempt("aiark", row)
             found = self.ai_ark.find_mobile(
                 first,
                 last,
@@ -573,30 +596,16 @@ class Waterfall:
             self._note_circuit("aiark", _int_attr(self.ai_ark, "errors") > before_e)
             if found:
                 hit = self._accept_phone(
-                    found.phone, source_tier=found.source_tier, raw=found.raw
+                    found.phone,
+                    source_tier=found.source_tier,
+                    raw=found.raw,
+                    require_verify=True,
                 )
                 if hit:
                     self._bump("aiark", "phone_hits")
 
-        if not hit and eligible.get("leadmagic"):
-            before_e = _int_attr(self.leadmagic, "errors")
-            self._bump_attempt("leadmagic", row)
-            found = self.leadmagic.find_mobile(
-                linkedin_url=linkedin, work_email=work_email
-            )
-            self._note_circuit(
-                "leadmagic", _int_attr(self.leadmagic, "errors") > before_e
-            )
-            if found:
-                hit = self._accept_phone(
-                    found.phone, source_tier=found.source_tier, raw=found.raw
-                )
-                if hit:
-                    self._bump("leadmagic", "phone_hits")
-
-        if not hit and eligible.get("prospeo"):
+        if not hit and eligible.get("prospeo") and self._allowed("prospeo") and self._bump_attempt("prospeo", row):
             before_e = _int_attr(self.prospeo, "errors")
-            self._bump_attempt("prospeo", row)
             found = self.prospeo.find_mobile(
                 first,
                 last,
@@ -610,14 +619,16 @@ class Waterfall:
             )
             if found:
                 hit = self._accept_phone(
-                    found.phone, source_tier=found.source_tier, raw=found.raw
+                    found.phone,
+                    source_tier=found.source_tier,
+                    raw=found.raw,
+                    require_verify=True,
                 )
                 if hit:
                     self._bump("prospeo", "phone_hits")
 
-        if not hit and eligible.get("fullenrich"):
+        if not hit and eligible.get("fullenrich") and self._allowed("fullenrich") and self._bump_attempt("fullenrich", row):
             before_e = _int_attr(self.fullenrich, "errors")
-            self._bump_attempt("fullenrich", row)
             found = self.fullenrich.find_mobile(
                 first,
                 last,
@@ -630,7 +641,10 @@ class Waterfall:
             )
             if found:
                 hit = self._accept_phone(
-                    found.phone, source_tier=found.source_tier, raw=found.raw
+                    found.phone,
+                    source_tier=found.source_tier,
+                    raw=found.raw,
+                    require_verify=True,
                 )
                 if hit:
                     self._bump("fullenrich", "phone_hits")
