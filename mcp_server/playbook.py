@@ -69,6 +69,8 @@ Rows with first_name + last_name + company_name and no domain are tagged
 tool). Smartlead is skipped (needs a domain). Then AI Ark → Prospeo →
 FullEnrich. `company_name` is sent to FullEnrich verbatim. When a
 tier returns an email, its domain is written back for later tiers.
+GetLeads DM lookup (`lookup_decision_makers`) sends exactly one identifier:
+`domain` when present, otherwise `company_name`.
 
 ## Tiers
 getleads (OAuth MCP) → Smartlead (included plan email finder) → AI Ark →

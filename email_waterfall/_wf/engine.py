@@ -20,6 +20,7 @@ from email_waterfall.need import (
 )
 from email_waterfall.people import looks_like_person, pick_best_person
 from email_waterfall.vendors.base import EmailHit, PersonHit, PhoneHit
+from email_waterfall.vendors.getleads import is_identifier_validation_error
 from email_waterfall.vendors.veriphone import VeriphoneResult
 
 from email_waterfall._wf.const import (
@@ -219,6 +220,22 @@ class Waterfall:
                 self.tier_stats[tier]["disabled"] = True
                 self.tier_stats[tier]["disabled_reason"] = reason
                 log.warning("tier disabled tier=%s reason=%s", tier, reason)
+
+    def _reset_circuit(self, tier: str) -> None:
+        """Re-open a tripped circuit so the tier can retry after a caller-side fix."""
+        with self._lock:
+            self._circuit_outcomes.pop(tier, None)
+            self._circuit_disabled.pop(tier, None)
+            stats = self.tier_stats.setdefault(tier, _empty_stats())
+            stats.pop("disabled", None)
+            stats.pop("disabled_reason", None)
+
+    def _should_reset_identifier_circuit(self, tier: str) -> bool:
+        if tier not in self._circuit_disabled:
+            return False
+        first = str(getattr(getattr(self, tier, None), "first_error", "") or "")
+        reason = self._circuit_disabled.get(tier) or ""
+        return is_identifier_validation_error(f"{first} {reason}")
 
     def _pick(self, people: list[PersonHit]) -> PersonHit | None:
         ranked = pick_best_person(
@@ -440,8 +457,11 @@ class Waterfall:
                 return best
 
         vendors: list[tuple[str, Any]] = []
-        if domain and self.getleads.enabled and self._allowed("getleads"):
-            vendors.append(("getleads", self.getleads))
+        if (domain or company) and self.getleads.enabled:
+            if self._should_reset_identifier_circuit("getleads"):
+                self._reset_circuit("getleads")
+            if self._allowed("getleads"):
+                vendors.append(("getleads", self.getleads))
         if self.ai_ark.enabled and self._allowed("aiark"):
             vendors.append(("aiark", self.ai_ark))
 
@@ -459,19 +479,15 @@ class Waterfall:
             ):
                 continue
             before_e = _int_attr(client, "errors")
-            if domain:
-                people = client.find_people(
-                    domain,
-                    company_name=company,
-                    titles=self.target_titles,
-                )
-            else:
-                people = client.find_people(
-                    domain,
-                    company_name=company,
-                    titles=self.target_titles,
-                    full_name=row.get("full_name") or "",
-                )
+            extra: dict[str, Any] = {}
+            if tier != "getleads":
+                extra["full_name"] = row.get("full_name") or ""
+            people = client.find_people(
+                domain,
+                company_name=company,
+                titles=self.target_titles,
+                **extra,
+            )
             self._book_vendor(client, tier, hit=bool(people), function="people")
             self._note_circuit(tier, _int_attr(client, "errors") > before_e)
             picked = self._pick(people)
