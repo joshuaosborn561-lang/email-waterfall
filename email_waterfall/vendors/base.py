@@ -63,14 +63,26 @@ def person_from_row(row: dict[str, Any], source_tier: str) -> PersonHit | None:
         first_name=first,
         last_name=last,
         full_name=full or f"{first} {last}".strip(),
-        title=str(row.get("title") or row.get("job_title") or row.get("headline") or ""),
+        title=str(
+            row.get("title")
+            or row.get("job_title")
+            or row.get("current_title")
+            or row.get("headline")
+            or ""
+        ),
         job_level=str(row.get("job_level") or row.get("seniority") or ""),
-        email=str(row.get("email") or "").strip().lower(),
+        email=str(
+            row.get("email") or row.get("work_email") or row.get("workEmail") or ""
+        ).strip().lower(),
         linkedin_url=str(
             row.get("linkedin_url") or row.get("linkedin") or row.get("profile_url") or ""
         ),
         phone=str(
-            row.get("phone") or row.get("mobile") or row.get("cellphone") or ""
+            row.get("phone")
+            or row.get("mobile")
+            or row.get("cellphone")
+            or row.get("mobile_phone")
+            or ""
         ).strip(),
         source_tier=source_tier,
         raw=row,

@@ -4,21 +4,27 @@ from __future__ import annotations
 
 import logging
 
+from pathlib import Path
+
 from email_waterfall.vendors.getleads import (
     DECISION_MAKERS_TOOL,
     GetLeadsClient,
     PERSON_ENRICH_TOOL,
     arguments_valid,
     collapse_company_identifiers,
+    contact_title_matches,
     is_identifier_validation_error,
+    is_rate_limit_error,
     items_ready,
     map_arguments,
+    normalize_decision_maker,
     people_lookup_values,
     pick_satisfiable_tool,
     pick_tool,
     route_email_lookup,
     score_email_tool,
     score_people_tool,
+    unwrap_decision_makers,
 )
 from email_waterfall.vendors.mcp_http import McpError
 
@@ -168,10 +174,11 @@ class Tok:
 
 
 class FakeMcp:
-    def __init__(self, result=None, error=None, tools=None):
+    def __init__(self, result=None, error=None, tools=None, errors=None):
         self.result = result
         self.error = error
         self.tools = tools
+        self._error_queue = list(errors or [])
         self.calls: list[tuple[str, dict]] = []
 
     def list_tools(self):
@@ -227,6 +234,8 @@ class FakeMcp:
                     "linkedin_company_url",
                     status=-32602,
                 )
+        if self._error_queue:
+            raise self._error_queue.pop(0)
         if self.error is not None:
             raise self.error
         return self.result
@@ -652,3 +661,258 @@ def test_identifier_validation_error_text() -> None:
     )
     assert not is_identifier_validation_error("items expected array, received undefined")
     assert not is_identifier_validation_error("")
+
+
+def _recorded_dm_contacts() -> dict:
+    import json
+
+    path = Path(__file__).parent / "fixtures" / "getleads_lookup_decision_makers.json"
+    return json.loads(path.read_text())
+
+
+def test_unwrap_decision_makers_reads_contacts_not_items_or_results() -> None:
+    recorded = _recorded_dm_contacts()
+    decoy = {
+        "contacts": recorded["contacts"],
+        "items": [{"first_name": "Nope", "current_title": "Intern"}],
+        "results": [{"first_name": "Nope", "current_title": "Intern"}],
+    }
+    rows = unwrap_decision_makers(decoy)
+    assert len(rows) == 3
+    assert [r["first_name"] for r in rows] == ["Ann", "Ben", "Cara"]
+    assert unwrap_decision_makers({"results": recorded["contacts"]}) == []
+    assert unwrap_decision_makers({"items": [{"foo": 1}]}) == []
+
+
+def test_normalize_decision_maker_maps_current_title_and_work_email() -> None:
+    mapped = normalize_decision_maker(_recorded_dm_contacts()["contacts"][0])
+    assert mapped["job_title"] == "Owner"
+    assert mapped["title"] == "Owner"
+    assert mapped["email"] == "ann@acme.test"
+    assert mapped["phone"] == "+15551111111"
+    assert mapped["domain"] == "acme.test"
+    assert contact_title_matches(mapped["current_title"], ["Owner", "CEO"])
+
+
+def test_find_people_parses_recorded_contacts_and_logs_title_match(caplog) -> None:
+    recorded = _recorded_dm_contacts()
+    mcp = FakeMcp(result=recorded, tools=[LOOKUP_DM_TOOL])
+    client = GetLeadsClient(token_manager=Tok(), mcp=mcp, tools=[LOOKUP_DM_TOOL])
+    with caplog.at_level(logging.INFO, logger="email_waterfall.vendors.getleads"):
+        people = client.find_people("acme.test", titles=["Owner", "President", "CEO"])
+    assert len(people) == 3
+    assert [p.title for p in people] == ["Owner", "President", "CEO"]
+    assert [p.email for p in people] == [
+        "ann@acme.test",
+        "ben@acme.test",
+        "cara@acme.test",
+    ]
+    assert client.last_contacts_returned == 3
+    assert client.last_title_matched == 3
+    assert any("contacts=3" in rec.message for rec in caplog.records)
+    assert any("title_matched=3" in rec.message for rec in caplog.records)
+
+
+def test_recorded_getleads_contacts_write_three_rows(monkeypatch) -> None:
+    from email_waterfall import waterfall
+    from tests.test_waterfall import _patch_clients, _patch_writes, _vendor
+
+    recorded = _recorded_dm_contacts()
+    mcp = FakeMcp(result=recorded, tools=[LOOKUP_DM_TOOL])
+    gl = GetLeadsClient(token_manager=Tok(), mcp=mcp, tools=[LOOKUP_DM_TOOL])
+    sink: dict = {}
+    _patch_clients(
+        monkeypatch,
+        gl=gl,
+        ark=_vendor(enabled=False),
+        fe=_vendor(enabled=False),
+    )
+    _patch_writes(monkeypatch, sink)
+
+    out = waterfall.enrich_waterfall(
+        [{"domain": "acme.test", "company_name": "Acme"}],
+        client_tag="goliath",
+        need="dm",
+        max_tier="getleads",
+        target_titles=["Owner", "President", "CEO"],
+        require_title_match=True,
+        write_supabase=True,
+        parallel=False,
+    )
+    assert out["contacts_written"] == 3
+    assert out["dms_found"] == 1
+    assert out["tier_stats"]["getleads"]["dm_hits"] == 3
+    assert out["tier_stats"]["getleads"]["email_hits"] == 3
+    assert sink["contacts_table"] == "goliath_wf_contacts"
+    assert len(sink["contacts"]) == 3
+    assert {c["first_name"] for c in sink["contacts"]} == {"Ann", "Ben", "Cara"}
+    assert all(c["source_tier"] == "getleads" for c in sink["contacts"])
+    assert all(c["email_status"] == "VALID" for c in sink["contacts"])
+    assert {c["email"] for c in sink["contacts"]} == {
+        "ann@acme.test",
+        "ben@acme.test",
+        "cara@acme.test",
+    }
+    assert {c["job_title"] for c in sink["contacts"]} == {"Owner", "President", "CEO"}
+
+
+def test_too_many_requests_retries_and_is_not_an_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "email_waterfall.vendors.getleads.time.sleep", lambda _s: None
+    )
+    recorded = _recorded_dm_contacts()
+    err = McpError("Too many requests", status=429, body="Too many requests")
+    mcp = FakeMcp(
+        result=recorded,
+        tools=[LOOKUP_DM_TOOL],
+        errors=[err, err],
+    )
+    client = GetLeadsClient(token_manager=Tok(), mcp=mcp, tools=[LOOKUP_DM_TOOL])
+    people = client.find_people("acme.test", titles=["Owner"])
+    assert len(people) == 3
+    assert client.errors == 0
+    assert client.calls == 1
+    assert len(mcp.calls) == 3
+    assert client.first_error is None
+
+
+def test_rate_limit_does_not_trip_circuit(monkeypatch) -> None:
+    from email_waterfall import waterfall
+    from tests.test_waterfall import _patch_clients, _patch_writes, _vendor
+
+    monkeypatch.setattr(
+        "email_waterfall.vendors.getleads.time.sleep", lambda _s: None
+    )
+    err = McpError("Too many requests", status=429, body="Too many requests")
+    mcp = FakeMcp(error=err, tools=[LOOKUP_DM_TOOL])
+    gl = GetLeadsClient(token_manager=Tok(), mcp=mcp, tools=[LOOKUP_DM_TOOL])
+    _patch_clients(
+        monkeypatch,
+        gl=gl,
+        ark=_vendor(enabled=False),
+        fe=_vendor(enabled=False),
+    )
+    _patch_writes(monkeypatch, {})
+    rows = [{"domain": f"acme{i}.test", "company_name": "Acme"} for i in range(25)]
+    out = waterfall.enrich_waterfall(
+        rows,
+        client_tag="goliath",
+        need="dm",
+        max_tier="getleads",
+        write_supabase=True,
+        parallel=False,
+    )
+    assert gl.errors == 0
+    assert out["tier_stats"]["getleads"].get("disabled") is not True
+    assert gl.calls == 25
+
+
+def test_title_miss_writeback_is_found_not_not_found(monkeypatch) -> None:
+    from email_waterfall import waterfall
+    from tests.test_waterfall import _patch_clients, _patch_writes, _vendor
+
+    recorded = {
+        "contacts": [
+            {
+                "first_name": "Sam",
+                "last_name": "Seller",
+                "current_title": "Sales Manager",
+                "work_email": "sam@acme.test",
+                "email_status": "VALID",
+                "linkedin_url": "",
+                "company_domain": "acme.test",
+                "mobile_phone": "",
+            }
+        ]
+    }
+    mcp = FakeMcp(result=recorded, tools=[LOOKUP_DM_TOOL])
+    gl = GetLeadsClient(token_manager=Tok(), mcp=mcp, tools=[LOOKUP_DM_TOOL])
+    writebacks: list[dict] = []
+
+    def fake_writeback(src, **kwargs):
+        writebacks.append(kwargs)
+
+    _patch_clients(
+        monkeypatch,
+        gl=gl,
+        ark=_vendor(enabled=False),
+        fe=_vendor(enabled=False),
+    )
+    _patch_writes(monkeypatch, {})
+    monkeypatch.setattr(
+        waterfall.table_source,
+        "fetch_source_rows",
+        lambda src: [{"_source_key": 11, "domain": "acme.test", "company_name": "Acme"}],
+    )
+    monkeypatch.setattr(waterfall.table_source, "ensure_writeback_columns", lambda src: [])
+    monkeypatch.setattr(waterfall.table_source, "writeback_result", fake_writeback)
+
+    out = waterfall.enrich_waterfall(
+        client_tag="goliath",
+        need="dm",
+        max_tier="getleads",
+        target_titles=["Owner", "CEO"],
+        require_title_match=True,
+        write_supabase=True,
+        parallel=False,
+        source={
+            "project_id": "kemvxzhcxvynmoutwdrh",
+            "table": "ew_names_ready",
+            "where": "wf_status is null",
+        },
+    )
+    assert out["contacts_written"] == 0
+    assert gl.last_contacts_returned == 1
+    assert gl.last_title_matched == 0
+    assert writebacks
+    assert writebacks[0]["status"] == "found"
+    assert writebacks[0]["status"] != "not_found"
+
+
+def test_zero_contacts_writeback_is_not_found(monkeypatch) -> None:
+    from email_waterfall import waterfall
+    from tests.test_waterfall import _patch_clients, _patch_writes, _vendor
+
+    mcp = FakeMcp(result={"contacts": []}, tools=[LOOKUP_DM_TOOL])
+    gl = GetLeadsClient(token_manager=Tok(), mcp=mcp, tools=[LOOKUP_DM_TOOL])
+    writebacks: list[dict] = []
+
+    def fake_writeback(src, **kwargs):
+        writebacks.append(kwargs)
+
+    _patch_clients(
+        monkeypatch,
+        gl=gl,
+        ark=_vendor(enabled=False),
+        fe=_vendor(enabled=False),
+    )
+    _patch_writes(monkeypatch, {})
+    monkeypatch.setattr(
+        waterfall.table_source,
+        "fetch_source_rows",
+        lambda src: [{"_source_key": 12, "domain": "empty.test", "company_name": "Empty"}],
+    )
+    monkeypatch.setattr(waterfall.table_source, "ensure_writeback_columns", lambda src: [])
+    monkeypatch.setattr(waterfall.table_source, "writeback_result", fake_writeback)
+
+    waterfall.enrich_waterfall(
+        client_tag="goliath",
+        need="dm",
+        max_tier="getleads",
+        write_supabase=True,
+        parallel=False,
+        source={
+            "project_id": "kemvxzhcxvynmoutwdrh",
+            "table": "ew_names_ready",
+            "where": "wf_status is null",
+        },
+    )
+    assert writebacks
+    assert writebacks[0]["status"] == "not_found"
+
+
+def test_is_rate_limit_error_text() -> None:
+    assert is_rate_limit_error(McpError("Too many requests", status=429))
+    assert is_rate_limit_error("rate limit exceeded")
+    assert not is_rate_limit_error("items expected array, received undefined")
+    assert not is_identifier_validation_error("Too many requests")

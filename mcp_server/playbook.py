@@ -70,7 +70,13 @@ tool). Smartlead is skipped (needs a domain). Then AI Ark → Prospeo →
 FullEnrich. `company_name` is sent to FullEnrich verbatim. When a
 tier returns an email, its domain is written back for later tiers.
 GetLeads DM lookup (`lookup_decision_makers`) sends exactly one identifier:
-`domain` when present, otherwise `company_name`.
+`domain` when present, otherwise `company_name`. The response is a JSON
+object with a `contacts` array — read `contacts`, not `items` or `results`.
+Map `current_title` → job_title and `work_email` → email, title-match
+against the client list, and write every match to `{client}_wf_contacts`
+with `source_tier=getleads`. `Too many requests` is a rate limit (backoff
++ retry, about 4 rps), not a circuit error. Source `wf_status=not_found`
+only when getleads returned zero contacts.
 
 ## Tiers
 getleads (OAuth MCP) → Smartlead (included plan email finder) → AI Ark →

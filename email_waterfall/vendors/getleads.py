@@ -8,11 +8,14 @@ caused silent 404s; we never invent a tool name that isn't on the server.
 from __future__ import annotations
 
 import logging
+import os
 import threading
+import time
 from typing import Any
 
 from email_waterfall.config import settings
 from email_waterfall.need import CAP_EMAIL, CAP_PEOPLE, assert_capability
+from email_waterfall.people import title_matches
 from email_waterfall.vendors.base import EmailHit, PersonHit, person_from_row
 from email_waterfall.vendors.errors import bump_errors, log_vendor_failure
 from email_waterfall.vendors.mcp_http import McpError, McpHttpClient
@@ -51,6 +54,20 @@ PEOPLE_NAME_HINTS = (
 )
 COMPANY_IDENTIFIER_KEYS = ("domain", "company_name", "linkedin_company_url")
 DECISION_MAKERS_TOOL = "lookup_decision_makers"
+GETLEADS_MAX_RPS = 4
+RATE_LIMIT_RETRIES = 4
+_RATE_LIMIT_MARKERS = (
+    "too many requests",
+    "too many request",
+    "rate limit",
+    "rate-limit",
+    "ratelimit",
+    "retry later",
+    "retry-after",
+    "slow down",
+)
+_PACE_LOCK = threading.Lock()
+_PACE_NEXT = 0.0
 SEARCH_NAME_HINTS = (
     "search_leads",
     "search_people",
@@ -417,6 +434,58 @@ def is_identifier_validation_error(text: str) -> bool:
     )
 
 
+def is_rate_limit_error(
+    exc: BaseException | str | None = None,
+    *,
+    status: int | str | None = None,
+    body: str = "",
+) -> bool:
+    """True when GetLeads said Too many requests — a throttle, not a vendor error."""
+    if status in (429, "429"):
+        return True
+    parts = [str(exc or ""), body]
+    if isinstance(exc, McpError):
+        parts.extend([str(exc.body or ""), str(exc.status or "")])
+        if exc.status == 429:
+            return True
+    low = " ".join(parts).lower()
+    return any(marker in low for marker in _RATE_LIMIT_MARKERS)
+
+
+def reset_getleads_pace() -> None:
+    """Test helper: do not carry the 4 rps lock across cases."""
+    global _PACE_NEXT
+    with _PACE_LOCK:
+        _PACE_NEXT = 0.0
+
+
+def _max_rps() -> float:
+    raw = (os.environ.get("GETLEADS_MAX_RPS") or "").strip()
+    if not raw:
+        return float(GETLEADS_MAX_RPS)
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return float(GETLEADS_MAX_RPS)
+
+
+def _pace_getleads() -> None:
+    """Keep tools/call starts at about GETLEADS_MAX_RPS."""
+    global _PACE_NEXT
+    min_interval = 1.0 / _max_rps()
+    with _PACE_LOCK:
+        now = time.monotonic()
+        wait = _PACE_NEXT - now
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _PACE_NEXT = now + min_interval
+
+
+def _rate_limit_wait(attempt: int) -> float:
+    return min(8.0, 0.25 * (2**attempt))
+
+
 def person_enrich_item(
     first_name: str,
     last_name: str,
@@ -467,8 +536,35 @@ def _looks_like_person_dict(row: Any) -> bool:
         & (
             NAME_KEYS
             | LAST_KEYS
-            | {"full_name", "fullname", "name", "email", "linkedin", "linkedin_url"}
+            | {
+                "full_name",
+                "fullname",
+                "name",
+                "email",
+                "work_email",
+                "current_title",
+                "job_title",
+                "linkedin",
+                "linkedin_url",
+            }
         )
+    )
+
+
+def _looks_like_decision_maker(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    keys = {_norm_key(k) for k in row}
+    return bool(
+        keys
+        & {
+            "current_title",
+            "work_email",
+            "mobile_phone",
+            "company_domain",
+            "first_name",
+            "firstname",
+        }
     )
 
 
@@ -505,6 +601,63 @@ def unwrap_records(data: Any) -> list[dict[str, Any]]:
     if _looks_like_person_dict(data):
         return [data]
     return []
+
+
+def unwrap_decision_makers(data: Any) -> list[dict[str, Any]]:
+    """lookup_decision_makers returns {contacts: [...]}. Do not prefer items/results."""
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return [r for r in data if isinstance(r, dict)]
+    if not isinstance(data, dict):
+        return []
+    contacts = data.get("contacts")
+    if isinstance(contacts, list):
+        return [r for r in contacts if isinstance(r, dict)]
+    if isinstance(contacts, dict) and _looks_like_person_dict(contacts):
+        return [contacts]
+    nested = data.get("data")
+    if isinstance(nested, dict) and "contacts" in nested:
+        inner = unwrap_decision_makers(nested)
+        if inner:
+            return inner
+    # Older people-at-domain fixtures use people/leads. Never items/results.
+    for key in ("people", "leads"):
+        alt = data.get(key)
+        if isinstance(alt, list):
+            return [r for r in alt if isinstance(r, dict)]
+    # MCP extract_tool_result wraps a bare contact list as {"items": [...]}.
+    items = data.get("items")
+    if isinstance(items, list) and items and any(_looks_like_decision_maker(r) for r in items):
+        return [r for r in items if isinstance(r, dict)]
+    if _looks_like_decision_maker(data) or _looks_like_person_dict(data):
+        return [data]
+    return []
+
+
+def normalize_decision_maker(row: dict[str, Any]) -> dict[str, Any]:
+    """Map current_title → job_title/title and work_email → email."""
+    flat = _flatten_person(row)
+    current = str(flat.get("current_title") or "").strip()
+    if current:
+        flat.setdefault("job_title", current)
+        flat.setdefault("title", current)
+    work = str(flat.get("work_email") or flat.get("workEmail") or "").strip()
+    if work:
+        flat.setdefault("email", work)
+    mobile = str(flat.get("mobile_phone") or "").strip()
+    if mobile:
+        flat.setdefault("phone", mobile)
+    domain = str(flat.get("company_domain") or "").strip()
+    if domain:
+        flat.setdefault("domain", domain)
+    return flat
+
+
+def contact_title_matches(title: str, titles: list[str] | None) -> bool:
+    if not titles:
+        return True
+    return any(title_matches(title, target) for target in titles)
 
 
 def _flatten_person(row: dict[str, Any]) -> dict[str, Any]:
@@ -655,6 +808,8 @@ class GetLeadsClient:
         self._tools = tools
         self._tools_lock = threading.Lock()
         self._stats_lock = threading.Lock()
+        self.last_contacts_returned = 0
+        self.last_title_matched = 0
         if self._tools is None:
             self._warm_tools()
 
@@ -803,18 +958,41 @@ class GetLeadsClient:
                 return None
         with self._stats_lock:
             self.calls += 1
-        try:
-            return self._client().call_tool(tool_name, payload)
-        except McpError as exc:
-            self._record_call_error(
-                exc,
-                status=exc.status if exc.status is not None else "mcp",
-                body=exc.body or str(exc),
-            )
-            return None
-        except Exception as exc:
-            self._record_call_error(exc, status="transport", body=str(exc))
-            return None
+        last_exc: BaseException | None = None
+        for attempt in range(RATE_LIMIT_RETRIES):
+            _pace_getleads()
+            try:
+                return self._client().call_tool(tool_name, payload)
+            except McpError as exc:
+                last_exc = exc
+                if is_rate_limit_error(exc) and attempt < RATE_LIMIT_RETRIES - 1:
+                    log.info(
+                        "getleads rate limited tool=%s attempt=%s; backing off",
+                        tool_name,
+                        attempt + 1,
+                    )
+                    time.sleep(_rate_limit_wait(attempt))
+                    continue
+                if is_rate_limit_error(exc):
+                    log.info(
+                        "getleads rate limited tool=%s after %s attempts; not an error",
+                        tool_name,
+                        RATE_LIMIT_RETRIES,
+                    )
+                    return None
+                self._record_call_error(
+                    exc,
+                    status=exc.status if exc.status is not None else "mcp",
+                    body=exc.body or str(exc),
+                )
+                return None
+            except Exception as exc:
+                last_exc = exc
+                self._record_call_error(exc, status="transport", body=str(exc))
+                return None
+        if last_exc is not None and not is_rate_limit_error(last_exc):
+            self._record_call_error(last_exc, status="transport", body=str(last_exc))
+        return None
 
     def _call(self, tool: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
         mapped = collapse_company_identifiers(map_arguments(tool, arguments))
@@ -932,6 +1110,8 @@ class GetLeadsClient:
         limit: int = 10,
     ) -> list[PersonHit]:
         assert_capability(CAP_PEOPLE, vendor=self.tier, endpoint="mcp tools/call")
+        self.last_contacts_returned = 0
+        self.last_title_matched = 0
         if not self.enabled:
             return []
         try:
@@ -957,15 +1137,28 @@ class GetLeadsClient:
         data = self._call(tool, args)
         if not data:
             return []
+        records = unwrap_decision_makers(data)
+        self.last_contacts_returned = len(records)
         out: list[PersonHit] = []
-        for row in unwrap_records(data)[:limit]:
-            person = person_from_row(_flatten_person(row), self.tier)
+        matched_n = 0
+        for row in records[:limit]:
+            mapped = normalize_decision_maker(row)
+            person = person_from_row(mapped, self.tier)
             if not person:
                 continue
-            phone = person.phone or extract_phone(_flatten_person(row))
+            phone = person.phone or extract_phone(mapped)
             if phone and not person.phone:
                 person.phone = phone
             out.append(person)
+            if contact_title_matches(person.title, titles):
+                matched_n += 1
+        self.last_title_matched = matched_n
+        log.info(
+            "getleads lookup_decision_makers contacts=%s title_matched=%s ident=%s",
+            self.last_contacts_returned,
+            matched_n,
+            ident.get("domain") or ident.get("company_name") or "",
+        )
         if out:
             self.hits += 1
         return out

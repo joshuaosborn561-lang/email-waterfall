@@ -28,7 +28,7 @@ TIER_ENV_KEYS: dict[str, str] = {
 }
 
 DEFAULT_VENDOR_LIMITS: dict[str, int] = {
-    "getleads": 10,
+    "getleads": 4,
     "smartlead": 3,
     "aiark": 8,
     "prospeo": 6,
