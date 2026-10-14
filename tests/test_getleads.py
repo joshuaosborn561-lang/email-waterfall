@@ -5,14 +5,20 @@ from __future__ import annotations
 import logging
 
 from email_waterfall.vendors.getleads import (
+    DECISION_MAKERS_TOOL,
     GetLeadsClient,
     PERSON_ENRICH_TOOL,
     arguments_valid,
+    collapse_company_identifiers,
+    is_identifier_validation_error,
     items_ready,
     map_arguments,
+    people_lookup_values,
     pick_satisfiable_tool,
+    pick_tool,
     route_email_lookup,
     score_email_tool,
+    score_people_tool,
 )
 from email_waterfall.vendors.mcp_http import McpError
 
@@ -38,6 +44,25 @@ PEOPLE_TOOL = {
             "domain": {"type": "string"},
             "job_titles": {"type": "array"},
         },
+    },
+}
+
+LOOKUP_DM_TOOL = {
+    "name": "lookup_decision_makers",
+    "description": (
+        "Find decision makers at a company. Provide exactly one of domain, "
+        "company_name, or linkedin_company_url."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "domain": {"type": "string"},
+            "company_name": {"type": "string"},
+            "linkedin_company_url": {"type": "string"},
+            "limit": {"type": "integer"},
+            "offset": {"type": "integer"},
+        },
+        "additionalProperties": False,
     },
 }
 
@@ -187,6 +212,19 @@ class FakeMcp:
             ):
                 raise McpError(
                     "Invalid arguments for tool getleads_enrich_person_batch",
+                    status=-32602,
+                )
+        if name == "lookup_decision_makers":
+            ident = [
+                key
+                for key in ("domain", "company_name", "linkedin_company_url")
+                if arguments.get(key)
+            ]
+            if len(ident) != 1:
+                raise McpError(
+                    "Invalid arguments for tool lookup_decision_makers: "
+                    "Provide exactly one of domain, company_name, or "
+                    "linkedin_company_url",
                     status=-32602,
                 )
         if self.error is not None:
@@ -547,3 +585,70 @@ def test_invoke_never_sends_undefined_items() -> None:
     assert mcp.calls == []
     assert client.calls == 0
     assert client.errors == 0
+
+
+def test_people_lookup_values_domain_wins() -> None:
+    assert people_lookup_values("acme.com", "Acme Inc") == {"domain": "acme.com"}
+    assert people_lookup_values("acme.com", "") == {"domain": "acme.com"}
+    assert people_lookup_values("", "Acme Inc") == {"company_name": "Acme Inc"}
+    assert people_lookup_values("", "") == {}
+    assert people_lookup_values("  ", "  Acme  ") == {"company_name": "Acme"}
+
+
+def test_collapse_company_identifiers_keeps_domain() -> None:
+    assert collapse_company_identifiers(
+        {"domain": "acme.com", "company_name": "Acme", "limit": 10}
+    ) == {"domain": "acme.com", "limit": 10}
+    assert collapse_company_identifiers({"company_name": "Acme"}) == {
+        "company_name": "Acme"
+    }
+
+
+def test_find_people_sends_domain_only_when_both_present() -> None:
+    mcp = FakeMcp(result=ANON_PEOPLE, tools=[LOOKUP_DM_TOOL])
+    client = GetLeadsClient(token_manager=Tok(), mcp=mcp, tools=[LOOKUP_DM_TOOL])
+    people = client.find_people(
+        "perelson.com", company_name="Perelson", titles=["Owner"]
+    )
+    assert len(people) == 1
+    assert mcp.calls[0][0] == DECISION_MAKERS_TOOL
+    args = mcp.calls[0][1]
+    assert args["domain"] == "perelson.com"
+    assert "company_name" not in args
+    assert "linkedin_company_url" not in args
+    assert args["limit"] == 10
+    assert client.errors == 0
+
+
+def test_find_people_sends_company_name_only_without_domain() -> None:
+    mcp = FakeMcp(result=ANON_PEOPLE, tools=[LOOKUP_DM_TOOL])
+    client = GetLeadsClient(token_manager=Tok(), mcp=mcp, tools=[LOOKUP_DM_TOOL])
+    people = client.find_people("", company_name="Perelson")
+    assert len(people) == 1
+    args = mcp.calls[0][1]
+    assert args == {"company_name": "Perelson", "limit": 10}
+    assert client.errors == 0
+
+
+def test_find_people_skips_when_no_identifier() -> None:
+    mcp = FakeMcp(result=ANON_PEOPLE, tools=[LOOKUP_DM_TOOL])
+    client = GetLeadsClient(token_manager=Tok(), mcp=mcp, tools=[LOOKUP_DM_TOOL])
+    people = client.find_people("", company_name="")
+    assert people == []
+    assert mcp.calls == []
+    assert client.calls == 0
+    assert client.errors == 0
+
+
+def test_pick_people_tool_prefers_lookup_decision_makers() -> None:
+    tool = pick_tool([PEOPLE_TOOL, LOOKUP_DM_TOOL, SEARCH_TOOL], score_people_tool)
+    assert tool is not None
+    assert tool["name"] == DECISION_MAKERS_TOOL
+
+
+def test_identifier_validation_error_text() -> None:
+    assert is_identifier_validation_error(
+        "Provide exactly one of domain, company_name, or linkedin_company_url"
+    )
+    assert not is_identifier_validation_error("items expected array, received undefined")
+    assert not is_identifier_validation_error("")

@@ -47,7 +47,10 @@ PEOPLE_NAME_HINTS = (
     "employees",
     "decision_maker",
     "decision-maker",
+    "lookup_decision",
 )
+COMPANY_IDENTIFIER_KEYS = ("domain", "company_name", "linkedin_company_url")
+DECISION_MAKERS_TOOL = "lookup_decision_makers"
 SEARCH_NAME_HINTS = (
     "search_leads",
     "search_people",
@@ -191,6 +194,8 @@ def score_people_tool(tool: dict[str, Any]) -> int:
     score = 0
     if any(h in name for h in PEOPLE_NAME_HINTS):
         score += 6
+    if "lookup_decision_maker" in name.replace("-", "_"):
+        score += 10
     if bool(keys & DOMAIN_KEYS):
         score += 5
     if bool(keys & TITLE_KEYS):
@@ -372,6 +377,44 @@ def items_ready(arguments: dict[str, Any] | None) -> bool:
     if not isinstance(items, list) or not items:
         return False
     return all(isinstance(row, dict) and row for row in items)
+
+
+def people_lookup_values(domain: str = "", company_name: str = "") -> dict[str, str]:
+    """Exactly one company identifier: domain when present, else company_name."""
+    domain = (domain or "").strip()
+    company = (company_name or "").strip()
+    if domain:
+        return {"domain": domain}
+    if company:
+        return {"company_name": company}
+    return {}
+
+
+def collapse_company_identifiers(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Keep domain, else company_name, else linkedin_company_url — never two."""
+    out = dict(arguments)
+    present = [
+        key
+        for key in COMPANY_IDENTIFIER_KEYS
+        if out.get(key) not in (None, "", [], {})
+    ]
+    if len(present) <= 1:
+        return out
+    keep = "domain" if "domain" in present else present[0]
+    for key in COMPANY_IDENTIFIER_KEYS:
+        if key != keep:
+            out.pop(key, None)
+    return out
+
+
+def is_identifier_validation_error(text: str) -> bool:
+    """True when GetLeads rejected a dual-identifier lookup_decision_makers call."""
+    low = (text or "").lower()
+    if "exactly one" in low:
+        return True
+    return "linkedin_company_url" in low and (
+        "domain" in low or "company_name" in low
+    )
 
 
 def person_enrich_item(
@@ -774,7 +817,7 @@ class GetLeadsClient:
             return None
 
     def _call(self, tool: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
-        mapped = map_arguments(tool, arguments)
+        mapped = collapse_company_identifiers(map_arguments(tool, arguments))
         if not arguments_valid(tool, mapped):
             return None
         return self._invoke_tool(_tool_name(tool), mapped, tool)
@@ -904,11 +947,10 @@ class GetLeadsClient:
                 "getleads has no tools/list entry covering people at a domain; skipping find_people",
             )
             return []
-        args: dict[str, Any] = {
-            "domain": domain,
-            "company_name": company_name or domain,
-            "size": limit,
-        }
+        ident = people_lookup_values(domain, company_name)
+        if not ident:
+            return []
+        args: dict[str, Any] = {**ident, "size": limit}
         if titles:
             args["titles"] = titles
             args["title"] = titles[0]

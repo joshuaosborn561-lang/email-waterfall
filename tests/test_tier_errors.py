@@ -209,6 +209,110 @@ def test_circuit_disables_tier_after_21_of_first_25(monkeypatch) -> None:
     assert any("getleads" in w for w in out["warnings"])
 
 
+def test_reset_circuit_reopens_getleads_after_identifier_error(monkeypatch) -> None:
+    from email_waterfall._wf.engine import Waterfall
+    from email_waterfall.vendors.base import PersonHit
+
+    class RecoveringGetLeads:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.hits = 0
+            self.errors = 0
+            self.first_error = (
+                "Provide exactly one of domain, company_name, or "
+                "linkedin_company_url"
+            )
+            self.people_calls: list[tuple[str, str]] = []
+
+        def find_people(self, domain, *, company_name="", titles=None, **kwargs):
+            self.calls += 1
+            self.people_calls.append((domain, company_name))
+            self.hits += 1
+            return [
+                PersonHit(
+                    first_name="Pat",
+                    last_name="Owner",
+                    title="Owner",
+                    email="pat@perelson.com",
+                    source_tier="getleads",
+                )
+            ]
+
+        def find_email(self, *args, **kwargs):
+            return None
+
+        def find_email_bulk(self, *args, **kwargs):
+            return []
+
+        def find_mobile(self, *args, **kwargs):
+            return None
+
+    gl = RecoveringGetLeads()
+    others = CountingVendor()
+    others.enabled = False
+    wf = Waterfall(
+        getleads=gl,
+        ai_ark=others,
+        prospeo=others,
+        fullenrich=others,
+        smartlead=others,
+        veriphone=others,
+        max_tier="getleads",
+        target_titles=["Owner"],
+        need="dm",
+    )
+    wf._circuit_disabled["getleads"] = "circuit open: 21 errors in first 21 calls"
+    wf.tier_stats["getleads"]["disabled"] = True
+    wf.tier_stats["getleads"]["disabled_reason"] = wf._circuit_disabled["getleads"]
+    wf._circuit_outcomes["getleads"] = [True] * 21
+
+    person = wf.resolve_dm(
+        {
+            "domain": "perelson.com",
+            "company_name": "Perelson",
+            "first_name": "",
+            "last_name": "",
+            "full_name": "",
+            "title": "",
+            "email": "",
+            "linkedin_url": "",
+            "mode": "domain",
+        }
+    )
+    assert person is not None
+    assert person.source_tier == "getleads"
+    assert gl.people_calls == [("perelson.com", "Perelson")]
+    assert "getleads" not in wf._circuit_disabled
+    assert wf.tier_stats["getleads"].get("disabled") is not True
+
+
+def test_reset_circuit_clears_disabled_flag() -> None:
+    from email_waterfall._wf.engine import Waterfall
+
+    dead = CountingVendor()
+    dead.enabled = False
+    wf = Waterfall(
+        getleads=dead,
+        ai_ark=dead,
+        prospeo=dead,
+        fullenrich=dead,
+        smartlead=dead,
+        veriphone=dead,
+        max_tier="getleads",
+    )
+    wf._circuit_disabled["getleads"] = "circuit open: 21 errors in first 21 calls"
+    wf.tier_stats["getleads"]["disabled"] = True
+    wf.tier_stats["getleads"]["disabled_reason"] = wf._circuit_disabled["getleads"]
+    wf._circuit_outcomes["getleads"] = [True] * 21
+    wf._reset_circuit("getleads")
+    assert "getleads" not in wf._circuit_disabled
+    assert "getleads" not in wf._circuit_outcomes
+    assert "disabled" not in wf.tier_stats["getleads"]
+    assert wf._allowed("getleads") is True
+
+
 def test_getleads_credits_charged_on_hit(monkeypatch) -> None:
     mcp = FakeMcp(result=ANON_EMAIL, tools=[PERSON_BATCH_TOOL])
     gl = GetLeadsClient(token_manager=Tok(), mcp=mcp, tools=[PERSON_BATCH_TOOL])
