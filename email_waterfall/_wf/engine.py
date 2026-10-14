@@ -18,7 +18,7 @@ from email_waterfall.need import (
     normalize_need,
     set_need,
 )
-from email_waterfall.people import looks_like_person, pick_best_person
+from email_waterfall.people import looks_like_person, pick_best_person, title_rank
 from email_waterfall.vendors.base import EmailHit, PersonHit, PhoneHit
 from email_waterfall.vendors.getleads import is_identifier_validation_error
 from email_waterfall.vendors.veriphone import VeriphoneResult
@@ -245,6 +245,24 @@ class Waterfall:
             require_title_match=self.require_title_match,
         )
         return ranked.person if ranked else None
+
+    def _title_ok(self, person: PersonHit) -> bool:
+        if not looks_like_person(person.first_name, person.last_name):
+            return False
+        if not self.require_title_match:
+            return True
+        rank, _ = title_rank(
+            person.title, self.target_titles, fallback_titles=self.fallback_titles
+        )
+        return rank > 0
+
+    @staticmethod
+    def _valid_work_email(person: PersonHit) -> bool:
+        email = (person.email or "").strip()
+        if not email or "@" not in email:
+            return False
+        status = str((person.raw or {}).get("email_status") or "").strip().upper()
+        return status == "VALID"
 
     def _email_cache_key(self, row: dict[str, Any]) -> tuple[str, ...]:
         return (
@@ -490,9 +508,24 @@ class Waterfall:
             )
             self._book_vendor(client, tier, hit=bool(people), function="people")
             self._note_circuit(tier, _int_attr(client, "errors") > before_e)
+            if tier == "getleads":
+                returned = getattr(client, "last_contacts_returned", None)
+                if isinstance(returned, (int, float)):
+                    row["_getleads_contacts_returned"] = int(returned)
+                else:
+                    row["_getleads_contacts_returned"] = len(people)
+                matched = [p for p in people if self._title_ok(p)]
+                row["_getleads_title_matched"] = len(matched)
+                if matched:
+                    row["_dm_matches"] = matched
+                    for person in matched:
+                        self._bump(tier, "dm_hits")
+                        if self._valid_work_email(person):
+                            self._bump(tier, "email_hits")
             picked = self._pick(people)
-            if picked:
+            if picked and tier != "getleads":
                 self._bump(tier, "dm_hits")
+            if picked:
                 consider(picked)
                 ranked = pick_best_person(
                     [picked],

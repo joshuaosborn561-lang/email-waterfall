@@ -514,6 +514,8 @@ def enrich_waterfall(
 
     Writeback (default true) patches wf_status / wf_email / wf_email_status /
     wf_vendor / wf_updated_at / wf_phone / wf_phone_type on the source table.
+    wf_status is found (contact written), title_miss (getleads contacts, no
+    title match), or not_found (zero contacts).
 
     `verify_only` = true checks existing phone numbers with Veriphone and
     writes the number + line type. No finder HTTP. Use this to classify

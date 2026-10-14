@@ -123,6 +123,9 @@ LEGACY_MAX_TIER_CEILING = "aiark"
 STATUS_COMPLETED = "completed"
 STATUS_REFUSED_OVER_CEILING = "refused_over_ceiling"
 STATUS_STOPPED_AT_CEILING = "stopped_at_ceiling"
+STATUS_FOUND = "found"
+STATUS_NOT_FOUND = "not_found"
+STATUS_TITLE_MISS = "title_miss"
 
 
 def _canon_tier_name(raw: str) -> str:

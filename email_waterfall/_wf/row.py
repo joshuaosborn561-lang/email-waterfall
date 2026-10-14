@@ -16,7 +16,10 @@ from email_waterfall.vendors.base import PersonHit, PhoneHit
 
 from email_waterfall._wf.const import (
     STATUS_COMPLETED,
+    STATUS_FOUND,
+    STATUS_NOT_FOUND,
     STATUS_STOPPED_AT_CEILING,
+    STATUS_TITLE_MISS,
     TIER_RANK,
     classify_rows,
     _fill_row_domain,
@@ -41,18 +44,87 @@ def _phone_type_of(wf: Waterfall, *numbers: str) -> str:
     return ""
 
 
+def _contact_email_status(person: PersonHit | None, email: str) -> str:
+    if not email:
+        return ""
+    raw_status = ""
+    if person is not None:
+        raw_status = str((person.raw or {}).get("email_status") or "").strip()
+    if raw_status:
+        return raw_status
+    return "found"
+
+
+def _people_to_write(item: dict[str, Any]) -> list[PersonHit]:
+    people = [p for p in (item.get("people") or []) if isinstance(p, PersonHit)]
+    if people:
+        return people
+    person = item.get("person")
+    return [person] if isinstance(person, PersonHit) else []
+
+
+def _contact_from_person(
+    client: ClientConfig,
+    item: dict[str, Any],
+    person: PersonHit,
+    *,
+    domain: str,
+) -> dict[str, Any] | None:
+    row = item["row"]
+    email = (person.email or "").strip().lower()
+    if person is item.get("person") and not email:
+        email = (item.get("email") or "").strip().lower()
+    title = person.title or row.get("title") or ""
+    cellphone = person.phone or (
+        item.get("phone") if person is item.get("person") else ""
+    ) or ""
+    line_type = item.get("phone_type") or "" if person is item.get("person") else ""
+    source_tier = person.source_tier or item.get("dm_tier") or item.get("email_tier") or ""
+    first = person.first_name or row.get("first_name") or ""
+    last = person.last_name or row.get("last_name") or ""
+    if not (first or last or email or cellphone):
+        return None
+    return _sync().contact_row(
+        client_tag=client.tag,
+        domain=domain,
+        first_name=first,
+        last_name=last,
+        job_title=title,
+        email=email,
+        email_status=_contact_email_status(person, email),
+        linkedin_url=person.linkedin_url or row.get("linkedin_url") or "",
+        cellphone=cellphone,
+        line_type=line_type,
+        contact_city=row.get("city") or "",
+        contact_state=row.get("state") or "",
+        source_tool=source_tier or "waterfall",
+        source_tier=source_tier,
+        place_id=row.get("place_id") or "",
+        confidence=0.7 if email or source_tier or cellphone else 0.0,
+    )
+
+
 def _company_contact_rows(
     client: ClientConfig,
     item: dict[str, Any],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     row = item["row"]
     email = item["email"]
     email_tier = item["email_tier"]
     dm_tier = item["dm_tier"]
     person = item["person"]
+    people = _people_to_write(item)
     domain = row.get("domain") or ""
     if not domain:
-        return None, None
+        for hit in people:
+            raw = hit.raw or {}
+            host = str(raw.get("company_domain") or raw.get("domain") or "").strip()
+            if host:
+                domain = host
+                row["domain"] = host
+                break
+    if not domain:
+        return None, []
 
     company = _sync().company_row(
         client_tag=client.tag,
@@ -67,8 +139,16 @@ def _company_contact_rows(
         source_tier={
             k: v for k, v in {"email": email_tier, "dm": dm_tier}.items() if v
         },
-        dm_lookup_status="found" if dm_tier else "not_found",
+        dm_lookup_status="found" if (dm_tier or people) else "not_found",
     )
+
+    contacts: list[dict[str, Any]] = []
+    if people:
+        for hit in people:
+            contact = _contact_from_person(client, item, hit, domain=domain)
+            if contact:
+                contacts.append(contact)
+        return company, contacts
 
     first = row["first_name"]
     last = row["last_name"]
@@ -79,29 +159,30 @@ def _company_contact_rows(
         title = person.title or title
     cellphone = item.get("phone") or ""
     line_type = item.get("phone_type") or ""
-    contact: dict[str, Any] | None = None
     if first or last or email or cellphone or line_type:
-        contact = _sync().contact_row(
-            client_tag=client.tag,
-            domain=domain,
-            first_name=first,
-            last_name=last,
-            job_title=title,
-            email=email,
-            email_status="found" if email else "",
-            linkedin_url=(person.linkedin_url if person else "")
-            or row.get("linkedin_url")
-            or "",
-            cellphone=cellphone,
-            line_type=line_type,
-            contact_city=row.get("city") or "",
-            contact_state=row.get("state") or "",
-            source_tool=email_tier or dm_tier or item.get("phone_tier") or "waterfall",
-            source_tier=email_tier or dm_tier or item.get("phone_tier") or "",
-            place_id=row.get("place_id") or "",
-            confidence=0.7 if email or dm_tier or cellphone else 0.0,
+        contacts.append(
+            _sync().contact_row(
+                client_tag=client.tag,
+                domain=domain,
+                first_name=first,
+                last_name=last,
+                job_title=title,
+                email=email,
+                email_status=_contact_email_status(person, email),
+                linkedin_url=(person.linkedin_url if person else "")
+                or row.get("linkedin_url")
+                or "",
+                cellphone=cellphone,
+                line_type=line_type,
+                contact_city=row.get("city") or "",
+                contact_state=row.get("state") or "",
+                source_tool=email_tier or dm_tier or item.get("phone_tier") or "waterfall",
+                source_tier=email_tier or dm_tier or item.get("phone_tier") or "",
+                place_id=row.get("place_id") or "",
+                confidence=0.7 if email or dm_tier or cellphone else 0.0,
+            )
         )
-    return company, contact
+    return company, contacts
 
 
 def _verify_only_row(wf: Waterfall, row: dict[str, Any]) -> dict[str, Any]:
@@ -131,6 +212,7 @@ def _verify_only_row(wf: Waterfall, row: dict[str, Any]) -> dict[str, Any]:
         "email_tier": "input" if email else "",
         "dm_tier": "",
         "person": None,
+        "people": [],
         "phone": phone,
         "phone_checked": existing,
         "phone_type": phone_type,
@@ -180,6 +262,10 @@ def _enrich_one_row(
                     email = person.email
                     email_tier = person.source_tier
 
+        matches = [
+            p for p in (row.get("_dm_matches") or []) if isinstance(p, PersonHit)
+        ]
+
         if want_email and not email:
             hit = wf.resolve_email(row, include_fullenrich=include_fullenrich)
             if hit:
@@ -220,6 +306,7 @@ def _enrich_one_row(
             "email_tier": email_tier,
             "dm_tier": dm_tier,
             "person": person,
+            "people": matches,
             "phone": phone,
             "phone_checked": original_phone or phone,
             "phone_type": phone_type,
@@ -404,17 +491,37 @@ def _result_payload(
     return out
 
 
+def _writeback_status(item: dict[str, Any]) -> str:
+    """Source wf_status.
+
+    `found` only when at least one contact was written.
+    `title_miss` when getleads returned contacts that failed the title match.
+    `not_found` only when getleads returned zero contacts (and nothing else
+    was written).
+    """
+    written = int(item.get("_contacts_written") or 0)
+    if written <= 0:
+        people = item.get("people") or []
+        if people or item.get("person") or item.get("email") or item.get("phone"):
+            written = 1
+    if written > 0:
+        return STATUS_FOUND
+    returned = int((item.get("row") or {}).get("_getleads_contacts_returned") or 0)
+    if returned > 0:
+        return STATUS_TITLE_MISS
+    return STATUS_NOT_FOUND
+
+
 def _maybe_writeback(src: table_source.TableSource | None, item: dict[str, Any]) -> None:
     if src is None:
         return
     email = item.get("email") or ""
     phone = item.get("phone") or item.get("phone_checked") or ""
     phone_type = item.get("phone_type") or ""
-    found = bool(email or item.get("phone"))
     table_source.writeback_result(
         src,
         key=item["row"].get("_source_key"),
-        status="found" if found else "not_found",
+        status=_writeback_status(item),
         email=email,
         email_status="found" if email else "not_found",
         vendor=item.get("email_tier")
@@ -432,13 +539,14 @@ def _write_company_contact(
     *,
     write_supabase: bool,
 ) -> tuple[int, int]:
-    company, contact = _company_contact_rows(client, item)
+    company, contact_rows = _company_contact_rows(client, item)
+    item["_contacts_written"] = len(contact_rows)
     companies = 0
     contacts = 0
     if write_supabase and company:
         companies = _sync().upsert_companies(client, [company])
-        if contact:
-            contacts = _sync().upsert_contacts(client, [contact])
+        if contact_rows:
+            contacts = _sync().upsert_contacts(client, contact_rows)
     return companies, contacts
 
 

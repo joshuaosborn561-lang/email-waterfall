@@ -1,0 +1,34 @@
+{
+  "contacts": [
+    {
+      "first_name": "Ann",
+      "last_name": "Owner",
+      "current_title": "Owner",
+      "work_email": "ann@acme.test",
+      "email_status": "VALID",
+      "linkedin_url": "https://linkedin.com/in/ann-owner",
+      "company_domain": "acme.test",
+      "mobile_phone": "+15551111111"
+    },
+    {
+      "first_name": "Ben",
+      "last_name": "President",
+      "current_title": "President",
+      "work_email": "ben@acme.test",
+      "email_status": "VALID",
+      "linkedin_url": "https://linkedin.com/in/ben-president",
+      "company_domain": "acme.test",
+      "mobile_phone": "+15552222222"
+    },
+    {
+      "first_name": "Cara",
+      "last_name": "Chief",
+      "current_title": "CEO",
+      "work_email": "cara@acme.test",
+      "email_status": "VALID",
+      "linkedin_url": "https://linkedin.com/in/cara-chief",
+      "company_domain": "acme.test",
+      "mobile_phone": "+15553333333"
+    }
+  ]
+}
