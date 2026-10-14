@@ -807,7 +807,7 @@ def test_rate_limit_does_not_trip_circuit(monkeypatch) -> None:
     assert gl.calls == 25
 
 
-def test_title_miss_writeback_is_found_not_not_found(monkeypatch) -> None:
+def test_title_miss_writeback_is_title_miss(monkeypatch) -> None:
     from email_waterfall import waterfall
     from tests.test_waterfall import _patch_clients, _patch_writes, _vendor
 
@@ -865,7 +865,8 @@ def test_title_miss_writeback_is_found_not_not_found(monkeypatch) -> None:
     assert gl.last_contacts_returned == 1
     assert gl.last_title_matched == 0
     assert writebacks
-    assert writebacks[0]["status"] == "found"
+    assert writebacks[0]["status"] == "title_miss"
+    assert writebacks[0]["status"] != "found"
     assert writebacks[0]["status"] != "not_found"
 
 
@@ -909,6 +910,29 @@ def test_zero_contacts_writeback_is_not_found(monkeypatch) -> None:
     )
     assert writebacks
     assert writebacks[0]["status"] == "not_found"
+
+
+def test_writeback_status_found_title_miss_not_found() -> None:
+    from email_waterfall._wf.row import _writeback_status
+
+    assert (
+        _writeback_status(
+            {"_contacts_written": 3, "row": {"_getleads_contacts_returned": 3}}
+        )
+        == "found"
+    )
+    assert (
+        _writeback_status(
+            {"_contacts_written": 0, "people": [], "row": {"_getleads_contacts_returned": 4}}
+        )
+        == "title_miss"
+    )
+    assert (
+        _writeback_status(
+            {"_contacts_written": 0, "people": [], "row": {"_getleads_contacts_returned": 0}}
+        )
+        == "not_found"
+    )
 
 
 def test_is_rate_limit_error_text() -> None:

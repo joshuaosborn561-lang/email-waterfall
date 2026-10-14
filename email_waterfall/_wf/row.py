@@ -16,7 +16,10 @@ from email_waterfall.vendors.base import PersonHit, PhoneHit
 
 from email_waterfall._wf.const import (
     STATUS_COMPLETED,
+    STATUS_FOUND,
+    STATUS_NOT_FOUND,
     STATUS_STOPPED_AT_CEILING,
+    STATUS_TITLE_MISS,
     TIER_RANK,
     classify_rows,
     _fill_row_domain,
@@ -491,19 +494,22 @@ def _result_payload(
 def _writeback_status(item: dict[str, Any]) -> str:
     """Source wf_status.
 
-    `found` when a contact was written, or when getleads returned contacts
-    that failed the title match. `not_found` only when getleads returned
-    zero contacts (and no later tier wrote anything).
+    `found` only when at least one contact was written.
+    `title_miss` when getleads returned contacts that failed the title match.
+    `not_found` only when getleads returned zero contacts (and nothing else
+    was written).
     """
-    email = item.get("email") or ""
-    phone = item.get("phone") or ""
-    people = item.get("people") or []
-    if email or phone or item.get("dm_tier") or people or item.get("person"):
-        return "found"
+    written = int(item.get("_contacts_written") or 0)
+    if written <= 0:
+        people = item.get("people") or []
+        if people or item.get("person") or item.get("email") or item.get("phone"):
+            written = 1
+    if written > 0:
+        return STATUS_FOUND
     returned = int((item.get("row") or {}).get("_getleads_contacts_returned") or 0)
     if returned > 0:
-        return "found"
-    return "not_found"
+        return STATUS_TITLE_MISS
+    return STATUS_NOT_FOUND
 
 
 def _maybe_writeback(src: table_source.TableSource | None, item: dict[str, Any]) -> None:
@@ -534,6 +540,7 @@ def _write_company_contact(
     write_supabase: bool,
 ) -> tuple[int, int]:
     company, contact_rows = _company_contact_rows(client, item)
+    item["_contacts_written"] = len(contact_rows)
     companies = 0
     contacts = 0
     if write_supabase and company:
