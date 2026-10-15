@@ -839,13 +839,20 @@ def test_title_miss_writeback_is_title_miss(monkeypatch) -> None:
         fe=_vendor(enabled=False),
     )
     _patch_writes(monkeypatch, {})
+    miss_rows = [{"_source_key": 11, "domain": "acme.test", "company_name": "Acme"}]
     monkeypatch.setattr(
         waterfall.table_source,
         "fetch_source_rows",
-        lambda src: [{"_source_key": 11, "domain": "acme.test", "company_name": "Acme"}],
+        lambda src: list(miss_rows),
     )
     monkeypatch.setattr(waterfall.table_source, "ensure_writeback_columns", lambda src: [])
     monkeypatch.setattr(waterfall.table_source, "writeback_result", fake_writeback)
+    monkeypatch.setattr(
+        waterfall.table_source,
+        "claim_source_rows",
+        lambda src, *, owner, n=1, lease_seconds=900: [miss_rows.pop(0)] if miss_rows else [],
+    )
+    monkeypatch.setattr(waterfall.table_source, "release_claims", lambda *a, **k: 0)
 
     out = waterfall.enrich_waterfall(
         client_tag="goliath",
@@ -888,13 +895,20 @@ def test_zero_contacts_writeback_is_not_found(monkeypatch) -> None:
         fe=_vendor(enabled=False),
     )
     _patch_writes(monkeypatch, {})
+    empty_rows = [{"_source_key": 12, "domain": "empty.test", "company_name": "Empty"}]
     monkeypatch.setattr(
         waterfall.table_source,
         "fetch_source_rows",
-        lambda src: [{"_source_key": 12, "domain": "empty.test", "company_name": "Empty"}],
+        lambda src: list(empty_rows),
     )
     monkeypatch.setattr(waterfall.table_source, "ensure_writeback_columns", lambda src: [])
     monkeypatch.setattr(waterfall.table_source, "writeback_result", fake_writeback)
+    monkeypatch.setattr(
+        waterfall.table_source,
+        "claim_source_rows",
+        lambda src, *, owner, n=1, lease_seconds=900: [empty_rows.pop(0)] if empty_rows else [],
+    )
+    monkeypatch.setattr(waterfall.table_source, "release_claims", lambda *a, **k: 0)
 
     waterfall.enrich_waterfall(
         client_tag="goliath",

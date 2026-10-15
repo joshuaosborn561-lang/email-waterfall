@@ -354,6 +354,8 @@ def test_writeback_patches_wf_columns(monkeypatch) -> None:
     assert body["wf_email"] == "jane@org.org"
     assert body["wf_status"] == "found"
     assert body["wf_vendor"] == "prospeo"
+    assert body["wf_lease_until"] is None
+    assert body["wf_lease_owner"] is None
     assert "dl_status" not in body
     assert "candidate_email" not in body
     assert "dl_provider" not in body
@@ -456,6 +458,20 @@ def test_source_enrich_writes_back(monkeypatch) -> None:
     )
     monkeypatch.setattr(waterfall.table_source, "ensure_writeback_columns", lambda src: [])
     monkeypatch.setattr(waterfall.table_source, "writeback_result", fake_writeback)
+    claimed = [
+        {
+            "_source_key": 9,
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "company_name": "Helping Hands",
+        }
+    ]
+
+    def fake_claim(src, *, owner, n=1, lease_seconds=900):
+        return [claimed.pop(0)] if claimed else []
+
+    monkeypatch.setattr(waterfall.table_source, "claim_source_rows", fake_claim)
+    monkeypatch.setattr(waterfall.table_source, "release_claims", lambda *a, **k: 0)
 
     out = waterfall.enrich_waterfall(
         client_tag="peterson",

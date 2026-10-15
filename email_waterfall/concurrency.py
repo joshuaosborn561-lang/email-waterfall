@@ -39,6 +39,7 @@ DEFAULT_VENDOR_LIMITS: dict[str, int] = {
 CROSS_PROCESS_TIERS = frozenset({"smartlead"})
 
 DEFAULT_COMPANY_CONCURRENCY = 40
+MAX_COMPANY_CONCURRENCY = 50
 
 
 def _env_int(name: str, default: int) -> int:
@@ -52,7 +53,11 @@ def _env_int(name: str, default: int) -> int:
 
 
 def company_concurrency() -> int:
-    return _env_int("COMPANY_CONCURRENCY", DEFAULT_COMPANY_CONCURRENCY)
+    """20–50 workers in production (default 40). Tests may set 1+; never clamp below 1."""
+    return min(
+        _env_int("COMPANY_CONCURRENCY", DEFAULT_COMPANY_CONCURRENCY),
+        MAX_COMPANY_CONCURRENCY,
+    )
 
 
 def vendor_concurrency(tier: str) -> int:

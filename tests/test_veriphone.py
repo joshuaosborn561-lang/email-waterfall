@@ -370,6 +370,21 @@ def test_need_phone_writes_source_phone_and_line_type(monkeypatch) -> None:
         "writeback_result",
         lambda src, **kwargs: writebacks.append(kwargs),
     )
+    phone_rows = [
+        {
+            "_source_key": 4,
+            "first_name": "Jane",
+            "last_name": "Smith",
+            "company_name": "Roof Co",
+            "domain": "roofco.com",
+        }
+    ]
+    monkeypatch.setattr(
+        waterfall.table_source,
+        "claim_source_rows",
+        lambda src, *, owner, n=1, lease_seconds=900: [phone_rows.pop(0)] if phone_rows else [],
+    )
+    monkeypatch.setattr(waterfall.table_source, "release_claims", lambda *a, **k: 0)
 
     out = waterfall.enrich_waterfall(
         client_tag="peterson",
@@ -420,6 +435,22 @@ def test_verify_only_skips_finders_and_writes_verdict(monkeypatch) -> None:
         "writeback_result",
         lambda src, **kwargs: writebacks.append(kwargs),
     )
+    verify_rows = [
+        {
+            "_source_key": 8,
+            "first_name": "Jane",
+            "last_name": "Smith",
+            "company_name": "Roof Co",
+            "domain": "roofco.com",
+            "phone": "415-555-2671",
+        }
+    ]
+    monkeypatch.setattr(
+        waterfall.table_source,
+        "claim_source_rows",
+        lambda src, *, owner, n=1, lease_seconds=900: [verify_rows.pop(0)] if verify_rows else [],
+    )
+    monkeypatch.setattr(waterfall.table_source, "release_claims", lambda *a, **k: 0)
 
     out = waterfall.enrich_waterfall(
         client_tag="peterson",
