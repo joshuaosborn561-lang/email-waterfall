@@ -513,9 +513,12 @@ def enrich_waterfall(
     key_column?, map?, limit?, cursor?}. Mutually exclusive with rows.
 
     Writeback (default true) patches wf_status / wf_email / wf_email_status /
-    wf_vendor / wf_updated_at / wf_phone / wf_phone_type on the source table.
-    wf_status is found (contact written), title_miss (getleads contacts, no
-    title match), or not_found (zero contacts).
+    wf_vendor / wf_updated_at / wf_phone / wf_phone_type on the source table
+    and clears wf_lease_until / wf_lease_owner. Paid table runs claim
+    unfinished rows (processing + expiring lease, 20–50 workers) so a
+    restart does not re-scan or double-spend. wf_status is found (contact
+    written), title_miss (getleads contacts, no title match), processing
+    (live lease), or not_found (zero contacts).
 
     `verify_only` = true checks existing phone numbers with Veriphone and
     writes the number + line type. No finder HTTP. Use this to classify
@@ -550,8 +553,10 @@ def enrich_waterfall(
     are accepted as a no-op warning and map to the old AI Ark ceiling.
     approve_cost_usd (default 5.0) estimates first and refuses if the quote
     exceeds the ceiling; a run that would go over stops with
-    status=stopped_at_ceiling. Never read or write dl_status, sg_exclude,
-    or skip_* columns — resume with wf_status is null.
+    status=stopped_at_ceiling and unprocessed claims are released, not
+    written not_found. Never read or write dl_status, sg_exclude,
+    or skip_* columns — resume with wf_status is null (expired
+    processing leases are claimed too).
     """
     _ensure_repo_cwd()
     _reload_settings()

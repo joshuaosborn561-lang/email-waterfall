@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -276,6 +278,132 @@ def _enrich_waterfall_parallel(
     )
 
 
+def _enrich_waterfall_claimed(
+    *,
+    client: ClientConfig,
+    need_norm: str,
+    max_tier_n: str,
+    titles: list[str],
+    require_title_match: bool,
+    write_supabase: bool,
+    wf: Waterfall,
+    progress_callback: ProgressCallback | None = None,
+    table_src: table_source.TableSource,
+    companies_total: int,
+    parallel: bool = True,
+) -> dict[str, Any]:
+    """Claim unfinished rows as workers go. Restart resumes expired leases only."""
+    from email_waterfall._wf.const import _norm_row
+
+    owner = f"ew:{os.getpid()}:{uuid.uuid4().hex[:12]}"
+    progress_lock = threading.Lock()
+    counters = {
+        "companies_done": 0,
+        "companies_upserted": 0,
+        "contacts_written": 0,
+        "emails_found": 0,
+        "dms_found": 0,
+        "phones_found": 0,
+    }
+
+    def _report() -> None:
+        if not progress_callback:
+            return
+        with progress_lock:
+            progress_callback(
+                _result_payload(
+                    parsed_count=companies_total,
+                    client=client,
+                    need_norm=need_norm,
+                    max_tier_n=max_tier_n,
+                    titles=titles,
+                    require_title_match=require_title_match,
+                    wf=wf,
+                    companies_upserted=counters["companies_upserted"],
+                    contacts_written=counters["contacts_written"],
+                    emails_found=counters["emails_found"],
+                    dms_found=counters["dms_found"],
+                    phones_found=counters["phones_found"],
+                    companies_done=counters["companies_done"],
+                    companies_total=companies_total,
+                )
+            )
+
+    def _process_claimed(raw: dict[str, Any]) -> None:
+        row = _norm_row(raw)
+        item = _enrich_one_row(
+            wf,
+            row,
+            need_norm=need_norm,
+            include_fullenrich=True,
+        )
+        upserted, written = _write_company_contact(
+            client, item, write_supabase=write_supabase
+        )
+        _maybe_writeback(table_src, item)
+        with progress_lock:
+            counters["companies_done"] += 1
+            counters["companies_upserted"] += upserted
+            counters["contacts_written"] += written
+            if item["email"]:
+                counters["emails_found"] += 1
+            if item["dm_tier"]:
+                counters["dms_found"] += 1
+            if item.get("phone"):
+                counters["phones_found"] += 1
+        _report()
+
+    def worker(initial: list[dict[str, Any]] | None = None) -> None:
+        pending = list(initial or [])
+        while not wf.stopped_at_ceiling:
+            if not pending:
+                pending = table_source.claim_source_rows(table_src, owner=owner, n=1)
+                if not pending:
+                    return
+            raw = pending.pop(0)
+            if wf.stopped_at_ceiling:
+                table_source.release_claims(
+                    table_src,
+                    owner=owner,
+                    keys=[raw.get("_source_key")],
+                )
+                return
+            _process_claimed(raw)
+
+    workers = company_concurrency() if parallel else 1
+    workers = max(1, workers)
+    seed = table_source.claim_source_rows(table_src, owner=owner, n=1)
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(worker, seed if i == 0 else None) for i in range(workers)
+            ]
+            for fut in as_completed(futures):
+                fut.result()
+    finally:
+        try:
+            table_source.release_claims(table_src, owner=owner)
+        except (table_source.ClaimUnavailable, RuntimeError):
+            pass
+
+    return _result_payload(
+        parsed_count=companies_total,
+        client=client,
+        need_norm=need_norm,
+        max_tier_n=max_tier_n,
+        titles=titles,
+        require_title_match=require_title_match,
+        wf=wf,
+        companies_upserted=counters["companies_upserted"],
+        contacts_written=counters["contacts_written"],
+        emails_found=counters["emails_found"],
+        dms_found=counters["dms_found"],
+        phones_found=counters["phones_found"],
+        companies_done=counters["companies_done"],
+        companies_total=companies_total,
+    )
+
+
 def enrich_waterfall(
     rows: Any = None,
     *,
@@ -442,6 +570,24 @@ def enrich_waterfall(
     wf.deprecated_max_tier = deprecated_max
     wf.deprecated_tiers = deprecated_skip
     wf.estimated_cost_usd = estimated_usd
+
+    if table_src and table_src.writeback:
+        try:
+            return _enrich_waterfall_claimed(
+                client=client,
+                need_norm=need_norm,
+                max_tier_n=max_tier_n,
+                titles=titles,
+                require_title_match=bool(require_title_match),
+                write_supabase=write_supabase,
+                wf=wf,
+                progress_callback=progress_callback,
+                table_src=table_src,
+                companies_total=len(parsed),
+                parallel=parallel,
+            )
+        except table_source.ClaimUnavailable:
+            pass
 
     runner = _enrich_waterfall_parallel if parallel else _enrich_waterfall_serial
     return runner(

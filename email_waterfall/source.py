@@ -14,6 +14,7 @@ from . import supabase_sync
 from .config import DEFAULT_SUPABASE_PROJECT, load_settings
 
 PAGE_SIZE = 500
+LEASE_SECONDS_DEFAULT = 900
 WRITEBACK_COLUMNS = (
     "wf_status",
     "wf_email",
@@ -22,8 +23,17 @@ WRITEBACK_COLUMNS = (
     "wf_updated_at",
     "wf_phone",
     "wf_phone_type",
+    "wf_lease_until",
+    "wf_lease_owner",
 )
 ALL_WRITEBACK_COLUMNS = WRITEBACK_COLUMNS
+LEASE_COLUMNS = ("wf_lease_until", "wf_lease_owner")
+
+
+class ClaimUnavailable(RuntimeError):
+    """ew_claim_source RPC is missing; caller should fall back to fetch-all."""
+
+
 FORBIDDEN_COLUMNS = frozenset(
     {
         "dl_status",
@@ -561,7 +571,7 @@ def _add_wf_columns(src: TableSource, needed: list[str]) -> list[str]:
     url, key = resolve_credentials(src.project_id)
     stmts = []
     for col in needed:
-        typ = "timestamptz" if col.endswith("_at") else "text"
+        typ = "timestamptz" if col.endswith("_at") or col.endswith("_until") else "text"
         stmts.append(
             f'alter table "{src.schema}"."{src.table}" add column if not exists "{col}" {typ}'
         )
@@ -626,6 +636,8 @@ def writeback_result(
         "wf_email_status": email_status or None,
         "wf_vendor": vendor_n,
         "wf_updated_at": datetime.now(timezone.utc).isoformat(),
+        "wf_lease_until": None,
+        "wf_lease_owner": None,
     }
     if phone_n or phone_type_n:
         body["wf_phone"] = phone_n
@@ -661,3 +673,99 @@ def writeback_result(
         prefer="return=minimal",
         extra_headers=_profile_headers(src.schema),
     )
+
+
+def _is_missing_rpc(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in (
+            "ew_claim_source",
+            "ew_release_claims",
+            "pgrst202",
+            "does not exist",
+            "404",
+            "not find the function",
+        )
+    )
+
+
+def claim_source_rows(
+    src: TableSource,
+    *,
+    owner: str,
+    n: int = 1,
+    lease_seconds: int = LEASE_SECONDS_DEFAULT,
+) -> list[dict[str, Any]]:
+    """Claim up to n unfinished rows (SKIP LOCKED). Never returns payloads to chat."""
+    discover_column_map(src)
+    url, key = resolve_credentials(src.project_id)
+    filters = where_to_filters(src.where)
+    limit = max(1, min(int(n or 1), 50))
+    try:
+        data = _rpc_json(
+            "rpc/ew_claim_source",
+            {
+                "p_schema": src.schema,
+                "p_table": src.table,
+                "p_filters": _filters_json(filters),
+                "p_columns": _select_list(src).split(","),
+                "p_key_column": src.key_column,
+                "p_limit": limit,
+                "p_owner": owner,
+                "p_lease_seconds": int(lease_seconds or LEASE_SECONDS_DEFAULT),
+            },
+            url=url,
+            key=key,
+        )
+    except RuntimeError as exc:
+        if _is_missing_rpc(exc):
+            raise ClaimUnavailable(str(exc)) from exc
+        raise
+    if isinstance(data, dict):
+        data = data.get("ew_claim_source") or data.get("data") or data
+    if not isinstance(data, list):
+        return []
+    mapped, _ = _map_raw_rows(src, data)
+    return mapped
+
+
+def release_claims(
+    src: TableSource,
+    *,
+    owner: str,
+    keys: list[Any] | None = None,
+) -> int:
+    """Clear processing leases for this owner (and optional keys). Does not write not_found."""
+    if not owner and not keys:
+        return 0
+    url, key = resolve_credentials(src.project_id)
+    payload: dict[str, Any] = {
+        "p_schema": src.schema,
+        "p_table": src.table,
+        "p_key_column": src.key_column,
+        "p_owner": owner or "",
+    }
+    if keys:
+        payload["p_keys"] = [str(k) for k in keys if k not in (None, "")]
+    try:
+        data = _rpc_json(
+            "rpc/ew_release_claims",
+            payload,
+            url=url,
+            key=key,
+        )
+    except RuntimeError as exc:
+        if _is_missing_rpc(exc):
+            return 0
+        raise
+    if isinstance(data, int):
+        return data
+    if isinstance(data, dict):
+        for val in data.values():
+            if isinstance(val, int):
+                return val
+    try:
+        return int(data or 0)
+    except (TypeError, ValueError):
+        return 0

@@ -48,14 +48,20 @@ source_table: "client_peterson.email_resolution"
 where: "wf_status is null"
 ```
 
-`source_table` accepts `schema.table`. The server pages 500 rows via a
+`source_table` accepts `schema.table`. Estimates page 500 rows via a
 security-definer RPC when the schema is not `public` (PostgREST only exposes
-public). Never returns payloads. Writeback (default on) patches `wf_status` /
-`wf_email` / `wf_email_status` / `wf_vendor` / `wf_updated_at` (and
-`wf_phone` / `wf_phone_type` for phone hits). `wf_status` is `found` when
-a contact was written, `title_miss` when getleads returned contacts that
-failed the title match, and `not_found` only on zero contacts. Never read
-or write `dl_status`, `sg_exclude`, or `skip_*`. Resume with `wf_status is null`.
+public). Paid runs claim unfinished rows (`ew_claim_source`,
+`FOR UPDATE SKIP LOCKED`, 15 minute `wf_lease_until`) with 20–50 workers
+(`COMPANY_CONCURRENCY`, default 40). Never returns payloads. Writeback
+(default on) patches `wf_status` / `wf_email` / `wf_email_status` /
+`wf_vendor` / `wf_updated_at` (and `wf_phone` / `wf_phone_type` for phone
+hits) and clears the lease. `wf_status` is `found` when a contact was
+written, `title_miss` when getleads returned contacts that failed the
+title match, `processing` while a live lease is held, and `not_found`
+only on zero contacts. A ceiling stop releases unprocessed claims; it
+does not write `not_found` on them. Never read or write `dl_status`,
+`sg_exclude`, or `skip_*`. Resume with `wf_status is null` — the claim
+RPC also takes expired `processing` leases.
 Existing contact rows upsert on `(client_tag, domain, first_name_key,
 last_name_key)` so a re-run does not duplicate a null-email person.
 Omitted `map` auto-picks `owner_title` → title, `candidate_email` → email,
