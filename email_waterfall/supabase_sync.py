@@ -7,6 +7,7 @@ Hard rules:
   when a person key is present (migration 006 unique index)
 - email-only contacts (no name keys) still merge on (domain, email)
 - never read or write dl_status, sg_exclude, or skip_* columns
+- PostgREST HTTP only; shared pool of at most 8; no per-thread libpq
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from typing import Any
 from urllib import error, request
 
 from .clients import ClientConfig
+from .concurrency import supabase_pool
 from .config import load_settings
 
 BATCH_SIZE = 200
@@ -66,14 +68,16 @@ def request_on(
         headers=headers,
         method=method,
     )
-    try:
-        with request.urlopen(req, timeout=120) as resp:
-            return resp.status, resp.read().decode("utf-8", errors="replace")
-    except error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"Supabase {method} {endpoint} failed ({exc.code}): {detail[:500]}"
-        ) from exc
+    # Borrow a shared PostgREST slot. Workers never open libpq connections.
+    with supabase_pool.acquire():
+        try:
+            with request.urlopen(req, timeout=120) as resp:
+                return resp.status, resp.read().decode("utf-8", errors="replace")
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Supabase {method} {endpoint} failed ({exc.code}): {detail[:500]}"
+            ) from exc
 
 
 def _request(

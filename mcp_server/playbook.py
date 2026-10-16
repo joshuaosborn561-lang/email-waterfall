@@ -52,7 +52,8 @@ where: "wf_status is null"
 security-definer RPC when the schema is not `public` (PostgREST only exposes
 public). Paid runs claim unfinished rows (`ew_claim_source`,
 `FOR UPDATE SKIP LOCKED`, 15 minute `wf_lease_until`) with 20–50 workers
-(`COMPANY_CONCURRENCY`, default 40). Never returns payloads. Writeback
+(`COMPANY_CONCURRENCY`, default 20). Workers share a PostgREST pool of
+at most 8 — they never hold their own Postgres connections. Never returns payloads. Writeback
 (default on) patches `wf_status` / `wf_email` / `wf_email_status` /
 `wf_vendor` / `wf_updated_at` (and `wf_phone` / `wf_phone_type` for phone
 hits) and clears the lease. `wf_status` is `found` when a contact was
@@ -83,7 +84,8 @@ object with a `contacts` array — read `contacts`, not `items` or `results`.
 Map `current_title` → job_title and `work_email` → email, title-match
 against the client list, and write every match to `{client}_wf_contacts`
 with `source_tier=getleads`. `Too many requests` is a rate limit (backoff
-+ retry, about 4 rps), not a circuit error. Source `wf_status` is `found`
++ jitter + retry, true 4 calls/sec on top of the in-flight semaphore),
+not a circuit error. Source `wf_status` is `found`
 only when at least one contact was written, `title_miss` when getleads
 returned contacts that failed the title match, and `not_found` only when
 getleads returned zero contacts.
