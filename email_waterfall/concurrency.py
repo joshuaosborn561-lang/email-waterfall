@@ -3,6 +3,10 @@
 VendorGate is process-wide (all MCP background jobs share it) and, for
 Smartlead, also cross-process via fcntl slot files so extra uvicorn workers
 cannot stampede the finder.
+
+GetLeads also has a 4 calls/sec RateLimiter on top of its in-flight
+semaphore. Supabase traffic shares an 8-slot PostgREST pool — workers
+never open their own Postgres connections (the project cap is 60).
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import os
 import random
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -38,8 +43,11 @@ DEFAULT_VENDOR_LIMITS: dict[str, int] = {
 
 CROSS_PROCESS_TIERS = frozenset({"smartlead"})
 
-DEFAULT_COMPANY_CONCURRENCY = 40
+DEFAULT_COMPANY_CONCURRENCY = 20
 MAX_COMPANY_CONCURRENCY = 50
+DEFAULT_SUPABASE_POOL = 8
+MAX_SUPABASE_POOL = 8
+GETLEADS_MAX_RPS = 4.0
 
 
 def _env_int(name: str, default: int) -> int:
@@ -52,18 +60,123 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return default
+
+
 def company_concurrency() -> int:
-    """20–50 workers in production (default 40). Tests may set 1+; never clamp below 1."""
+    """20–50 workers in production (default 20). Tests may set 1+; never clamp below 1."""
     return min(
         _env_int("COMPANY_CONCURRENCY", DEFAULT_COMPANY_CONCURRENCY),
         MAX_COMPANY_CONCURRENCY,
     )
 
 
+def supabase_pool_size() -> int:
+    """Shared PostgREST slots. Cap 8 so workers cannot each hold a DB connection."""
+    return min(
+        _env_int("SUPABASE_POOL_SIZE", DEFAULT_SUPABASE_POOL),
+        MAX_SUPABASE_POOL,
+    )
+
+
+def getleads_max_rps() -> float:
+    return _env_float("GETLEADS_MAX_RPS", GETLEADS_MAX_RPS)
+
+
 def vendor_concurrency(tier: str) -> int:
     key = TIER_ENV_KEYS.get(tier)
     default = DEFAULT_VENDOR_LIMITS.get(tier, 4)
     return _env_int(key or "", default) if key else default
+
+
+class RateLimiter:
+    """Min-interval limiter. Sleeps outside the lock so waiters do not serialize.
+
+    Used for GetLeads tool calls (4/sec) on top of the in-flight VendorGate.
+    """
+
+    def __init__(
+        self,
+        rate: float,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._next = 0.0
+        self.rate = float(rate)
+        self.sleep = sleep
+        self.clock = clock
+
+    def wait(self) -> float:
+        """Reserve the next start slot. Returns seconds slept."""
+        interval = 1.0 / max(0.1, self.rate)
+        slept = 0.0
+        while True:
+            with self._lock:
+                now = self.clock()
+                wait = self._next - now
+                if wait <= 0:
+                    self._next = now + interval
+                    return slept
+            self.sleep(wait)
+            slept += wait
+
+    def reset(self) -> None:
+        with self._lock:
+            self._next = 0.0
+
+
+class SharedSlotPool:
+    """Process-wide slot pool for PostgREST HTTP.
+
+    Workers never open libpq connections. Every Supabase call borrows one of
+    at most 8 slots (the project shares a 60-connection cap with live hooks).
+    """
+
+    def __init__(self, size: int | None = None) -> None:
+        n = DEFAULT_SUPABASE_POOL if size is None else max(1, int(size))
+        self._size = min(n, MAX_SUPABASE_POOL)
+        self._sem = threading.Semaphore(self._size)
+        self._lock = threading.Lock()
+        self.in_use = 0
+        self.peak = 0
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    def reset(self, size: int | None = None) -> None:
+        n = supabase_pool_size() if size is None else max(1, int(size))
+        self._size = min(n, MAX_SUPABASE_POOL)
+        self._sem = threading.Semaphore(self._size)
+        with self._lock:
+            self.in_use = 0
+            self.peak = 0
+
+    @contextmanager
+    def acquire(self) -> Iterator[None]:
+        self._sem.acquire()
+        with self._lock:
+            self.in_use += 1
+            self.peak = max(self.peak, self.in_use)
+        try:
+            yield
+        finally:
+            with self._lock:
+                self.in_use -= 1
+            self._sem.release()
+
+
+supabase_pool = SharedSlotPool()
+getleads_rate = RateLimiter(GETLEADS_MAX_RPS)
 
 
 def _lock_dir() -> Path:

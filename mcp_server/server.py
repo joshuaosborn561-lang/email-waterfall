@@ -515,7 +515,7 @@ def enrich_waterfall(
     Writeback (default true) patches wf_status / wf_email / wf_email_status /
     wf_vendor / wf_updated_at / wf_phone / wf_phone_type on the source table
     and clears wf_lease_until / wf_lease_owner. Paid table runs claim
-    unfinished rows (processing + expiring lease, 20–50 workers) so a
+    unfinished rows (processing + expiring lease, 20–50 workers, default 20) so a
     restart does not re-scan or double-spend. wf_status is found (contact
     written), title_miss (getleads contacts, no title match), processing
     (live lease), or not_found (zero contacts).
