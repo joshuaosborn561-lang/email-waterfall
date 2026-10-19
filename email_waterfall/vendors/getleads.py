@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import threading
 import time
 from typing import Any
 
+from email_waterfall.concurrency import GETLEADS_MAX_RPS, getleads_max_rps, getleads_rate
 from email_waterfall.config import settings
 from email_waterfall.need import CAP_EMAIL, CAP_PEOPLE, assert_capability
 from email_waterfall.people import title_matches
@@ -54,7 +56,6 @@ PEOPLE_NAME_HINTS = (
 )
 COMPANY_IDENTIFIER_KEYS = ("domain", "company_name", "linkedin_company_url")
 DECISION_MAKERS_TOOL = "lookup_decision_makers"
-GETLEADS_MAX_RPS = 4
 RATE_LIMIT_RETRIES = 4
 _RATE_LIMIT_MARKERS = (
     "too many requests",
@@ -66,8 +67,6 @@ _RATE_LIMIT_MARKERS = (
     "retry-after",
     "slow down",
 )
-_PACE_LOCK = threading.Lock()
-_PACE_NEXT = 0.0
 SEARCH_NAME_HINTS = (
     "search_leads",
     "search_people",
@@ -454,36 +453,26 @@ def is_rate_limit_error(
 
 def reset_getleads_pace() -> None:
     """Test helper: do not carry the 4 rps lock across cases."""
-    global _PACE_NEXT
-    with _PACE_LOCK:
-        _PACE_NEXT = 0.0
+    getleads_rate.reset()
+    getleads_rate.rate = GETLEADS_MAX_RPS
+    getleads_rate.sleep = time.sleep
 
 
 def _max_rps() -> float:
-    raw = (os.environ.get("GETLEADS_MAX_RPS") or "").strip()
-    if not raw:
-        return float(GETLEADS_MAX_RPS)
-    try:
-        return max(0.1, float(raw))
-    except ValueError:
-        return float(GETLEADS_MAX_RPS)
+    return getleads_max_rps()
 
 
 def _pace_getleads() -> None:
-    """Keep tools/call starts at about GETLEADS_MAX_RPS."""
-    global _PACE_NEXT
-    min_interval = 1.0 / _max_rps()
-    with _PACE_LOCK:
-        now = time.monotonic()
-        wait = _PACE_NEXT - now
-        if wait > 0:
-            time.sleep(wait)
-            now = time.monotonic()
-        _PACE_NEXT = now + min_interval
+    """True GETLEADS_MAX_RPS cap, independent of the in-flight VendorGate."""
+    getleads_rate.rate = _max_rps()
+    getleads_rate.sleep = time.sleep
+    getleads_rate.wait()
 
 
 def _rate_limit_wait(attempt: int) -> float:
-    return min(8.0, 0.25 * (2**attempt))
+    """Exponential backoff plus jitter. Not a circuit-breaker event."""
+    base = min(8.0, 0.25 * (2**attempt))
+    return base + random.uniform(0, max(0.05, base * 0.25))
 
 
 def person_enrich_item(
@@ -960,6 +949,7 @@ class GetLeadsClient:
             self.calls += 1
         last_exc: BaseException | None = None
         for attempt in range(RATE_LIMIT_RETRIES):
+            # 4/sec start-rate, then VendorGate (in-flight) inside call_tool HTTP.
             _pace_getleads()
             try:
                 return self._client().call_tool(tool_name, payload)

@@ -9,7 +9,11 @@ import pytest
 
 from email_waterfall import source as table_source
 from email_waterfall import waterfall
-from email_waterfall.concurrency import MAX_COMPANY_CONCURRENCY, company_concurrency
+from email_waterfall.concurrency import (
+    DEFAULT_COMPANY_CONCURRENCY,
+    MAX_COMPANY_CONCURRENCY,
+    company_concurrency,
+)
 from email_waterfall.vendors.base import EmailHit
 
 
@@ -22,6 +26,9 @@ def _src() -> table_source.TableSource:
 
 
 def test_company_concurrency_caps_at_fifty(monkeypatch) -> None:
+    monkeypatch.delenv("COMPANY_CONCURRENCY", raising=False)
+    assert DEFAULT_COMPANY_CONCURRENCY == 20
+    assert company_concurrency() == 20
     monkeypatch.setenv("COMPANY_CONCURRENCY", "80")
     assert company_concurrency() == MAX_COMPANY_CONCURRENCY
     monkeypatch.setenv("COMPANY_CONCURRENCY", "20")

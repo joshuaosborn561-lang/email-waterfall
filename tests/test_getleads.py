@@ -954,3 +954,44 @@ def test_is_rate_limit_error_text() -> None:
     assert is_rate_limit_error("rate limit exceeded")
     assert not is_rate_limit_error("items expected array, received undefined")
     assert not is_identifier_validation_error("Too many requests")
+
+
+def test_rate_limit_wait_includes_jitter(monkeypatch) -> None:
+    from email_waterfall.vendors import getleads as gl_mod
+
+    monkeypatch.setattr(gl_mod.random, "uniform", lambda _a, b: b)
+    waited = gl_mod._rate_limit_wait(0)
+    assert waited > 0.25
+    monkeypatch.setattr(gl_mod.random, "uniform", lambda _a, _b: 0.0)
+    assert gl_mod._rate_limit_wait(0) == 0.25
+    monkeypatch.setattr(gl_mod.random, "uniform", lambda a, b: (a + b) / 2)
+    assert gl_mod._rate_limit_wait(2) > gl_mod._rate_limit_wait(0)
+
+
+def test_invoke_tool_paces_before_call(monkeypatch) -> None:
+    from email_waterfall.vendors import getleads as gl_mod
+
+    paced = {"n": 0}
+
+    def _mark() -> None:
+        paced["n"] += 1
+
+    monkeypatch.setattr(gl_mod, "_pace_getleads", _mark)
+    monkeypatch.setattr(gl_mod, "_rate_limit_wait", lambda _a: 0.0)
+    recorded = {
+        "contacts": [
+            {
+                "first_name": "Ann",
+                "last_name": "Owner",
+                "current_title": "Owner",
+                "work_email": "ann@acme.test",
+                "email_status": "VALID",
+            }
+        ]
+    }
+    mcp = FakeMcp(result=recorded, tools=[LOOKUP_DM_TOOL])
+    client = GetLeadsClient(token_manager=Tok(), mcp=mcp, tools=[LOOKUP_DM_TOOL])
+    people = client.find_people("acme.test", titles=["Owner"])
+    assert len(people) == 1
+    assert paced["n"] >= 1
+
