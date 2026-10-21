@@ -63,7 +63,10 @@ class VeriphoneClient:
         assert_capability(
             CAP_PHONE, vendor=self.tier, endpoint="GET /v2/verify"
         )
-        qs = urlencode({"phone": number, "default_country": default_country})
+        # mode=current: live porting-registry line type (10 credits/lookup).
+        qs = urlencode(
+            {"phone": number, "default_country": default_country, "mode": "current"}
+        )
         url = f"{self.base_url}/v2/verify?{qs}"
         self.calls += 1
         r = http_client.get(
