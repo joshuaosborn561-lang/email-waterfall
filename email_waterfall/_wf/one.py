@@ -152,6 +152,11 @@ def enrich_one_person(
     if write_supabase:
         _write_company_contact(client, item, write_supabase=True)
     hit = compact_person_hit(item)
+    # Expose the Veriphone verdict so ReplyHandler's mobile gate can trust it.
+    verdict = wf.cached_phone_verdict(hit.get("phone") or "") if hit.get("phone") else None
+    hit["phone_valid"] = bool(verdict.phone_valid) if verdict is not None else None
+    if verdict is not None and verdict.phone_type:
+        hit["phone_type"] = verdict.phone_type
     hit.update(
         {
             "ok": not wf.stopped_at_ceiling,

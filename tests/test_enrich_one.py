@@ -123,3 +123,14 @@ def test_mcp_exposes_enrich_person() -> None:
     assert params["need"].default == "both"
     assert params["approve_cost_usd"].default == 0.25
     assert params["client_tag"].default is inspect.Parameter.empty
+
+
+def test_enrich_one_exposes_phone_valid(monkeypatch):
+    from types import SimpleNamespace
+    from email_waterfall._wf import one
+    from email_waterfall._wf.engine import Waterfall
+
+    monkeypatch.setattr(one, "_enrich_one_row", lambda wf, row, **k: {"row": row, "phone": "+12015550100", "phone_type": "mobile"})
+    monkeypatch.setattr(Waterfall, "cached_phone_verdict", lambda self, n: SimpleNamespace(phone_valid=True, phone_type="mobile"))
+    out = one.enrich_one_person(client_tag="peterson", first_name="Jane", last_name="Doe", domain="roofco.com", need="phone", max_tier="getleads")
+    assert out["phone_valid"] is True and out["phone_type"] == "mobile"
