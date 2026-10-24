@@ -714,6 +714,56 @@ def enrich_person(
         _tool_error(exc)
 
 
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Call-ready enrichment (verified phone, LinkedIn, ICP, DM)",
+        readOnlyHint=False,
+        openWorldHint=True,
+        destructiveHint=False,
+    )
+)
+def enrich_call_ready(
+    client_tag: str,
+    first_name: str = "",
+    last_name: str = "",
+    full_name: str = "",
+    email: str = "",
+    company_name: str = "",
+    domain: str = "",
+    title: str = "",
+    location: str = "",
+    linkedin_url: str = "",
+    known_phones: list[str] | None = None,
+    approve_cost_usd: float = 5.0,
+    steps: str = "phone,linkedin,icp,dm",
+    use_cache: bool = True,
+) -> str:
+    """Make one contact call-ready under a hard $5/lead cap.
+
+    Phone: FullEnrich first, then known_phones (Smartlead/HeyReach), then the
+    waterfall; each checked with Veriphone mode=current, mobile ranked first.
+    LinkedIn: scored candidates; low scores come back as 'review'.
+    ICP fit + decision maker: AI verdicts from ReplyHandler's client ICP.
+    Returns phone, phone_type, phone_verified, linkedin_url,
+    linkedin_confidence, icp_verdict/icp_reason, dm_verdict/dm_reason,
+    cost_usd. Cached per person.
+    """
+    _ensure_repo_cwd()
+    _reload_settings()
+    from email_waterfall.call_ready import enrich_call_ready as run
+
+    try:
+        return _json(run(
+            client_tag=client_tag, first_name=first_name, last_name=last_name,
+            full_name=full_name, email=email, company_name=company_name,
+            domain=domain, title=title, location=location,
+            linkedin_url=linkedin_url, known_phones=known_phones,
+            approve_cost_usd=approve_cost_usd, steps=steps, use_cache=use_cache,
+        ))
+    except Exception as exc:
+        _tool_error(exc)
+
+
 def _mount_http_routes() -> None:
     try:
         from starlette.requests import Request
@@ -785,6 +835,38 @@ def _mount_http_routes() -> None:
                 {"ok": False, "reason": f"{type(exc).__name__}: {exc}"},
                 status_code=400,
             )
+        return JSONResponse(hit)
+
+    @mcp.custom_route("/enrich-call-ready", methods=["POST"])
+    async def enrich_call_ready_http(request: Request) -> JSONResponse:
+        """ReplyHandler positive-reply lookup. Same as enrich_call_ready."""
+        import asyncio
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "reason": "invalid_json"}, status_code=400)
+        if not isinstance(body, dict) or not str(body.get("client_tag") or "").strip():
+            return JSONResponse({"ok": False, "reason": "client_tag is required"}, status_code=400)
+        _ensure_repo_cwd()
+        _reload_settings()
+        from email_waterfall.call_ready import enrich_call_ready as run
+
+        keys = ("first_name", "last_name", "full_name", "email", "company_name",
+                "domain", "title", "location", "linkedin_url")
+        kwargs = {k: str(body.get(k) or "") for k in keys}
+        try:
+            hit = await asyncio.to_thread(
+                run,
+                client_tag=str(body["client_tag"]).strip(),
+                known_phones=body.get("known_phones") or [],
+                approve_cost_usd=body.get("approve_cost_usd", 5.0),
+                steps=body.get("steps"),
+                use_cache=bool(body.get("use_cache", True)),
+                **kwargs,
+            )
+        except Exception as exc:
+            return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}"}, status_code=400)
         return JSONResponse(hit)
 
 
