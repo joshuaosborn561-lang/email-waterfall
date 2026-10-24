@@ -123,3 +123,42 @@ def test_mcp_exposes_enrich_person() -> None:
     assert params["need"].default == "both"
     assert params["approve_cost_usd"].default == 0.25
     assert params["client_tag"].default is inspect.Parameter.empty
+
+
+def _run(monkeypatch, item, verdict, calls=None):
+    from email_waterfall._wf import one
+    from email_waterfall._wf.engine import Waterfall
+
+    monkeypatch.setattr(one, "_enrich_one_row", lambda wf, row, **k: {"row": row, **item})
+    monkeypatch.setattr(Waterfall, "cached_phone_verdict", lambda self, n: None)
+
+    def live(self, n):
+        if calls is not None:
+            calls.append(n)
+        return verdict
+
+    monkeypatch.setattr(Waterfall, "_phone_verdict", live)
+    return one.enrich_one_person(client_tag="peterson", first_name="Jane", last_name="Doe", domain="roofco.com", need="both", max_tier="getleads")
+
+
+def test_enrich_one_veriphone_confirms_mobile(monkeypatch):
+    from types import SimpleNamespace
+    calls = []
+    v = SimpleNamespace(phone_valid=True, phone_type="mobile", e164="+12015550100", is_mobile=True)
+    out = _run(monkeypatch, {"phone": "2015550100", "phone_type": "mobile"}, v, calls)
+    assert calls == ["2015550100"]
+    assert out["phone_valid"] is True and out["phone_type"] == "mobile" and out["phone_mobile_confirmed"] is True
+    assert out["phone"] == "+12015550100"
+
+
+def test_enrich_one_vendor_mobile_label_not_trusted(monkeypatch):
+    from types import SimpleNamespace
+    v = SimpleNamespace(phone_valid=True, phone_type="landline", e164="+12015550100", is_mobile=False)
+    out = _run(monkeypatch, {"phone": "+12015550100", "phone_type": "mobile"}, v)
+    assert out["phone_type"] == "landline" and out["phone_mobile_confirmed"] is False
+    assert out["phone_type_vendor"] == "mobile"
+
+
+def test_enrich_one_no_verdict_is_not_mobile(monkeypatch):
+    out = _run(monkeypatch, {"phone": "+12015550100", "phone_type": "mobile"}, None)
+    assert out["phone_valid"] is None and out["phone_type"] == "" and out["phone_mobile_confirmed"] is False
