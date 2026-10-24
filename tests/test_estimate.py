@@ -52,7 +52,6 @@ def test_estimate_only_name_company_no_spend(monkeypatch) -> None:
         "getleads",
         "aiark",
         "prospeo",
-        "fullenrich",
     ]
     assert out["estimate"]["getleads"]["rows"] == 956
     assert "smartlead" not in out["estimate"]
@@ -66,7 +65,7 @@ def test_estimate_only_name_company_no_spend(monkeypatch) -> None:
     assert "leadmagic_phone" not in out["suppressed_by_need"]
     assert "leadmagic" not in out["estimate"]
     assert out["estimate"]["prospeo"]["credits_est"] == 956.0
-    assert out["estimate"]["fullenrich"]["credits_est"] == 956.0
+    assert "fullenrich" not in out["estimate"]  # reply-only
     assert out["spend"] == 0
     assert out["client_tag"] == "peterson_earthworks"
     assert out["contacts_table"] == "peterson_earthworks_wf_contacts"

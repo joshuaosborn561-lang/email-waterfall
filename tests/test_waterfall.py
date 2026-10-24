@@ -119,7 +119,7 @@ def test_max_tier_blocks_fullenrich(monkeypatch) -> None:
     assert out["vendors_enabled"]["prospeo"] is False
 
 
-def test_fullenrich_runs_when_max_tier_allows(monkeypatch) -> None:
+def test_bulk_never_runs_fullenrich(monkeypatch) -> None:
     sink: dict = {}
     gl = _vendor(email=None)
     lm = _vendor(email=None)
@@ -144,9 +144,10 @@ def test_fullenrich_runs_when_max_tier_allows(monkeypatch) -> None:
         max_tier="fullenrich",
         write_supabase=True,
     )
-    fe.find_email.assert_called_once()
-    assert out["emails_found"] == 1
-    assert sink["companies"][0]["email_source_tier"] == "fullenrich"
+    # FullEnrich is reply-only (Josh, Oct 24): bulk caps max_tier at prospeo.
+    fe.find_email.assert_not_called()
+    fe.find_email_bulk.assert_not_called()
+    assert out["max_tier"] == "prospeo"
 
 
 def test_stops_email_at_getleads(monkeypatch) -> None:
@@ -595,7 +596,7 @@ def test_prospeo_runs_after_aiark(monkeypatch) -> None:
     fe.find_email_bulk.assert_not_called()
     assert sink["companies"][0]["email_source_tier"] == "prospeo"
     assert out["vendors_enabled"]["prospeo"] is True
-    assert out["vendors_enabled"]["fullenrich"] is True
+    assert out["vendors_enabled"]["fullenrich"] is False  # reply-only
 
 
 def test_max_tier_leadmagic_blocks_prospeo(monkeypatch) -> None:
