@@ -41,6 +41,38 @@ def compact_person_hit(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _apply_veriphone_verdict(wf: Any, hit: dict[str, Any]) -> None:
+    """Every returned phone gets a Veriphone check (GET /v2/verify, mode=current).
+
+    phone_type is only ever Veriphone's answer, so "mobile" means Veriphone
+    confirmed valid + mobile. A vendor's own label is kept as
+    phone_type_vendor. No verdict (Veriphone off or HTTP failed) leaves
+    phone_valid=None and phone_type="" so nothing is treated as a cell.
+    Uses the run cache, so a number already checked is not paid for twice.
+    """
+    phone = (hit.get("phone") or "").strip()
+    vendor_type = hit.get("phone_type") or ""
+    hit["phone_type_vendor"] = vendor_type
+    hit["phone_valid"] = None
+    hit["phone_type"] = ""
+    hit["phone_mobile_confirmed"] = False
+    if not phone:
+        return
+    verdict = wf.cached_phone_verdict(phone)
+    if verdict is None:
+        try:
+            verdict = wf._phone_verdict(phone)
+        except Exception:  # noqa: BLE001 - never fail the lookup on the check
+            verdict = None
+    if verdict is None:
+        return
+    hit["phone_valid"] = bool(verdict.phone_valid)
+    hit["phone_type"] = (verdict.phone_type or "").lower()
+    hit["phone_mobile_confirmed"] = bool(verdict.is_mobile)
+    if verdict.e164:
+        hit["phone"] = verdict.e164
+
+
 def enrich_one_person(
     *,
     client_tag: str,
@@ -152,11 +184,7 @@ def enrich_one_person(
     if write_supabase:
         _write_company_contact(client, item, write_supabase=True)
     hit = compact_person_hit(item)
-    # Expose the Veriphone verdict so ReplyHandler's mobile gate can trust it.
-    verdict = wf.cached_phone_verdict(hit.get("phone") or "") if hit.get("phone") else None
-    hit["phone_valid"] = bool(verdict.phone_valid) if verdict is not None else None
-    if verdict is not None and verdict.phone_type:
-        hit["phone_type"] = verdict.phone_type
+    _apply_veriphone_verdict(wf, hit)
     hit.update(
         {
             "ok": not wf.stopped_at_ceiling,
