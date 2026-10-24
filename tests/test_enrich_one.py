@@ -119,7 +119,7 @@ def test_mcp_exposes_enrich_person() -> None:
     assert "enrich_person" in names
     params = inspect.signature(enrich_person).parameters
     assert params["write_supabase"].default is False
-    assert params["max_tier"].default == "fullenrich"
+    assert params["max_tier"].default == "prospeo"
     assert params["need"].default == "both"
     assert params["approve_cost_usd"].default == 0.25
     assert params["client_tag"].default is inspect.Parameter.empty

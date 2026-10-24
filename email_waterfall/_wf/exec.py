@@ -444,6 +444,13 @@ def enrich_waterfall(
     )
     max_tier_n, deprecated_max, max_notes = resolve_max_tier(max_tier)
     skip, deprecated_skip, skip_notes = resolve_skip_tiers(skip_tiers)
+    # Josh (Oct 24): FullEnrich is only for people who already replied
+    # (ReplyHandler /enrich-one). Bulk runs stop at Prospeo.
+    if max_tier_n == "fullenrich":
+        max_tier_n = "prospeo"
+        max_notes = list(max_notes) + [
+            "fullenrich is reply-only; bulk max_tier capped at prospeo"
+        ]
     control_warnings = max_notes + skip_notes
     ceiling = resolve_approve_cost_usd(
         approve_cost_usd, default=DEFAULT_APPROVE_COST_USD

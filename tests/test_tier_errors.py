@@ -91,9 +91,10 @@ def test_one_row_through_each_tier_fails_if_every_call_errors(monkeypatch) -> No
     assert isinstance(mcp.calls[0][1].get("items"), list)
     assert gl.errors == 0
     assert gl.calls == 1
-    for vendor in (ark, sl, prospeo, fe):
+    for vendor in (ark, sl, prospeo):
         assert vendor.calls >= 1
         assert vendor.errors == 0
+    assert fe.calls == 0  # FullEnrich is reply-only
 
 
 def test_one_row_without_linkedin_skips_linkedin_batch(monkeypatch) -> None:

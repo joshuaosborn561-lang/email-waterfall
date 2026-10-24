@@ -675,7 +675,7 @@ def enrich_person(
     company_name: str = "",
     domain: str = "",
     need: str = "both",
-    max_tier: str = "fullenrich",
+    max_tier: str = "prospeo",
     write_supabase: bool = False,
     approve_cost_usd: float | None = 0.25,
     skip_tiers: str | list[str] | None = None,
@@ -683,8 +683,8 @@ def enrich_person(
     """Look up one prospect through the waterfall and return that compact hit.
 
     For ReplyHandler Slack cards. Returns email / phone / linkedin_url /
-    website / source tiers — not a bulk payload dump. FullEnrich runs for
-    both work email and cellphone when max_tier is fullenrich.
+    website / source tiers — not a bulk payload dump. FullEnrich is reply-only:
+    this tool stops at Prospeo; only ReplyHandler's /enrich-one uses FullEnrich.
     Default write_supabase=false so a Slack-card lookup does not create
     {tag}_wf_* rows unless asked.
     """
@@ -704,7 +704,8 @@ def enrich_person(
                 company_name=company_name,
                 domain=domain,
                 need=need,
-                max_tier=max_tier,
+                # FullEnrich is reply-only (ReplyHandler POST /enrich-one).
+                max_tier=("prospeo" if wf.normalize_max_tier(max_tier) == "fullenrich" else max_tier),
                 write_supabase=bool(write_supabase),
                 approve_cost_usd=approve_cost_usd,
                 skip_tiers=skip_tiers,
