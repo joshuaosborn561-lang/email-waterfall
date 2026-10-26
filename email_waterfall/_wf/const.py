@@ -1,7 +1,11 @@
 """DM / work-email enrichment waterfall.
 
 Tiers (fixed, no Maps, no website crawl, no Apify):
-  getleads → Smartlead (plan email finder) → AI Ark → Prospeo → FullEnrich
+  bulk (enrich_waterfall):
+    IT rows:    [find LinkedIn] → Blitz → getleads → Smartlead → AI Ark → pattern → Prospeo
+    other rows: getleads → Smartlead → AI Ark → pattern → Prospeo
+  ReplyHandler (enrich_person / POST /enrich-one): same, then FullEnrich.
+FullEnrich is ReplyHandler only (Josh, Oct 25 2026).
 
 AI Ark is third on BOTH lanes after the included Smartlead allotment is used:
   people/DM: People Search by domain
@@ -27,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -45,23 +50,33 @@ from email_waterfall.vendors.smartlead import SmartleadClient
 log = logging.getLogger("email_waterfall.waterfall")
 
 Need = Literal["email", "dm", "both", "phone", "people_email"]
-MaxTier = Literal["getleads", "smartlead", "aiark", "prospeo", "fullenrich"]
+MaxTier = Literal[
+    "blitz", "getleads", "smartlead", "aiark", "pattern", "prospeo", "fullenrich"
+]
 
 TIER_ORDER: list[str] = [
+    "blitz",
     "getleads",
     "smartlead",
     "aiark",
+    "pattern",
     "prospeo",
     "fullenrich",
 ]
 TIER_RANK = {name: i for i, name in enumerate(TIER_ORDER)}
 DEFAULT_MAX_TIER: MaxTier = "prospeo"
+# Bulk enrich_waterfall never runs FullEnrich (ReplyHandler only).
+REPLY_ONLY_TIERS: frozenset[str] = frozenset({"fullenrich"})
+BULK_TIER_ORDER: list[str] = [t for t in TIER_ORDER if t not in REPLY_ONLY_TIERS]
+FULLENRICH_BULK_WARNING = "fullenrich is reply-handler only; capped at prospeo"
+# Name+company rows (no domain). pattern needs a domain, so it is not here.
 NAME_COMPANY_TIERS: tuple[str, ...] = (
+    "blitz",
     "getleads",
     "aiark",
     "prospeo",
-    "fullenrich",
 )
+REPLY_NAME_COMPANY_TIERS: tuple[str, ...] = NAME_COMPANY_TIERS + ("fullenrich",)
 CIRCUIT_WINDOW = 25
 CIRCUIT_ERROR_LIMIT = 20
 # Fallback / non-hit-priced tiers. AI Ark + Prospeo book per function on hit.
@@ -71,6 +86,9 @@ CREDIT_PER_ATTEMPT: dict[str, float] = {
     "aiark": 6.5,
     "prospeo": 11.0,
     "fullenrich": 1.0,
+    "pattern": 1.0,  # one MillionVerifier check per attempt
+    "blitz": 1.0,  # one Blitz record (prepaid)
+    "serper": 1.0,  # one Google query (LinkedIn resolver)
 }
 
 # Booked $/credit (Josh's contract rates). getleads / Smartlead / Veriphone are $0.
@@ -81,6 +99,9 @@ USD_PER_CREDIT: dict[str, float] = {
     "prospeo": 0.0148,
     "fullenrich": 0.055,
     "veriphone": 0.0,
+    "pattern": float(os.environ.get("MILLIONVERIFIER_USD_PER_CHECK") or 0.0037),
+    "blitz": 0.0,  # prepaid Start plan: records, not dollars
+    "serper": 0.001,
 }
 
 # Bulk jobs default to $5 so raising max_tier to Prospeo cannot run unbounded.
@@ -99,6 +120,11 @@ TIER_ALIASES: dict[str, str] = {
     "smart-lead": "smartlead",
     "sl": "smartlead",
     "prospector": "prospeo",
+    "pattern_guess": "pattern",
+    "guess": "pattern",
+    "mv_guess": "pattern",
+    "blitzapi": "blitz",
+    "blitz_api": "blitz",
     "apify": "getleads",  # Apify is not in this service; start at first paid tier
 }
 
@@ -378,11 +404,17 @@ def _fill_row_domain(row: dict[str, Any], *, email: str = "", raw: Any = None) -
 
 
 def _tiers_for_mode(
-    mode: str, max_tier: str, skip_tiers: set[str] | None = None
+    mode: str,
+    max_tier: str,
+    skip_tiers: set[str] | None = None,
+    *,
+    allow_fullenrich: bool = True,
 ) -> list[str]:
-    allowed = [t for t in TIER_ORDER if tier_allowed(t, max_tier, skip_tiers)]
+    order = TIER_ORDER if allow_fullenrich else BULK_TIER_ORDER
+    allowed = [t for t in order if tier_allowed(t, max_tier, skip_tiers)]
     if mode == "name_company":
-        return [t for t in allowed if t in NAME_COMPANY_TIERS]
+        nc = REPLY_NAME_COMPANY_TIERS if allow_fullenrich else NAME_COMPANY_TIERS
+        return [t for t in allowed if t in nc]
     if mode == "domain":
         return allowed
     return []
@@ -412,8 +444,17 @@ def estimate_waterfall(
     warnings: list[str] | None = None,
     deprecated_max_tier: str | None = None,
     deprecated_tiers: list[str] | None = None,
+    allow_fullenrich: bool = True,
+    it_lane: bool | None = None,
+    client_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Counts + per-vendor credit / USD estimate. No enrichment vendor calls."""
+    """Counts + per-vendor credit / USD estimate. No enrichment vendor calls.
+
+    allow_fullenrich=False (bulk) shows FullEnrich as not allowed at $0.
+    Blitz is counted only for IT rows that already have a LinkedIn URL ($0,
+    records shown); pattern at MILLIONVERIFIER_USD_PER_CHECK per attempt.
+    """
+    from email_waterfall.it_lane import it_row_reason
     max_tier_n = normalize_max_tier(max_tier)
     skip = set(skip_tiers or ())
     need_norm, need_caps = resolve_need(need) if caps is None else (need, caps)
@@ -451,7 +492,9 @@ def estimate_waterfall(
             out["deprecated_tiers"] = deprecated_tiers
         return out
     tiers_by_mode = {
-        mode: _tiers_for_mode(mode, max_tier_n, skip)
+        mode: _tiers_for_mode(
+            mode, max_tier_n, skip, allow_fullenrich=allow_fullenrich
+        )
         for mode in ("domain", "name_company")
         if modes.get(mode)
     }
@@ -459,8 +502,36 @@ def estimate_waterfall(
     for mode, count in modes.items():
         if mode == "skipped" or not count:
             continue
-        for tier in _tiers_for_mode(mode, max_tier_n, skip):
+        for tier in _tiers_for_mode(
+            mode, max_tier_n, skip, allow_fullenrich=allow_fullenrich
+        ):
             vendor_rows[tier] += count
+    # Blitz: only IT rows with a LinkedIn URL count as attempts in the quote.
+    blitz_rows = 0
+    serper_rows = 0
+    if vendor_rows.get("blitz"):
+        for r in parsed:
+            if (r.get("mode") or "") not in ("domain", "name_company"):
+                continue
+            if not it_row_reason(r, client_profile, it_lane):
+                continue
+            if (r.get("linkedin_url") or "").strip():
+                blitz_rows += 1
+            elif r.get("first_name") and r.get("last_name"):
+                serper_rows += 1
+        vendor_rows["blitz"] = blitz_rows
+    if not (blitz_rows or serper_rows):
+        # No IT rows: Blitz is not part of this job's order.
+        tiers_by_mode = {
+            m: [t for t in ts if t != "blitz"] for m, ts in tiers_by_mode.items()
+        }
+    # Pattern needs first + last + domain.
+    if vendor_rows.get("pattern"):
+        vendor_rows["pattern"] = sum(
+            1
+            for r in parsed
+            if r.get("mode") == "domain" and r.get("first_name") and r.get("last_name")
+        )
 
     credits: dict[str, Any] = {}
     sl = SmartleadClient(timeout=8)
@@ -495,6 +566,11 @@ def estimate_waterfall(
                 if want_email and want_phone
                 else ("phone-only" if want_phone and not want_email else "email-only")
             )
+        if tier == "blitz":
+            row["records_est"] = credits_est
+            row["rate_note"] = "prepaid records, $0"
+        if tier == "pattern":
+            row["rate_note"] = "one MillionVerifier check per attempt"
         if tier == "smartlead":
             row["credits_available"] = sl_snap.get("available")
             row["credits_total"] = sl_snap.get("total")
@@ -502,6 +578,24 @@ def estimate_waterfall(
         if count:
             credits[tier] = row
 
+    if serper_rows and "blitz" not in skip and tier_allowed("blitz", max_tier_n, skip):
+        # Worst case: every IT row without a LinkedIn URL needs a Serper query.
+        credits["serper"] = {
+            "rows": serper_rows,
+            "credits_est": float(serper_rows),
+            "credits_per_row": 1.0,
+            "usd_est": attempt_cost_usd("serper", credits=float(serper_rows)),
+            "credits_available": None,
+            "rate_note": "LinkedIn resolver worst case (one query per IT row)",
+        }
+    if not allow_fullenrich:
+        credits["fullenrich"] = {
+            "rows": 0,
+            "credits_est": 0.0,
+            "usd_est": 0.0,
+            "allowed": False,
+            "rate_note": "reply-handler only",
+        }
     mode_counts = {k: v for k, v in modes.items() if k != "skipped" and v}
     if modes.get("skipped"):
         mode_counts["skipped"] = modes["skipped"]

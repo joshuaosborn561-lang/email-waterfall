@@ -12,6 +12,7 @@ from email_waterfall.concurrency import company_concurrency
 from email_waterfall.need import CAP_EMAIL, CAP_PHONE, allows, resolve_need, using_need
 
 from email_waterfall._wf.const import (
+    FULLENRICH_BULK_WARNING,
     DEFAULT_APPROVE_COST_USD,
     DEFAULT_MAX_TIER,
     Need,
@@ -426,6 +427,7 @@ def enrich_waterfall(
     find_phone: bool | None = None,
     skip_tiers: Any = None,
     approve_cost_usd: float | int | str | None = None,
+    it_lane: bool | None = None,
 ) -> dict[str, Any]:
     """Walk paid vendors per row; upsert isolated client tables; return counts.
 
@@ -444,13 +446,16 @@ def enrich_waterfall(
     )
     max_tier_n, deprecated_max, max_notes = resolve_max_tier(max_tier)
     skip, deprecated_skip, skip_notes = resolve_skip_tiers(skip_tiers)
-    # Josh (Oct 24): FullEnrich is only for people who already replied
-    # (ReplyHandler /enrich-one). Bulk runs stop at Prospeo.
+    # Josh (Oct 25 2026): FullEnrich is ReplyHandler only (enrich_person /
+    # POST /enrich-one). Bulk runs stop at Prospeo; skip_tiers=fullenrich
+    # is a no-op.
     if max_tier_n == "fullenrich":
         max_tier_n = "prospeo"
-        max_notes = list(max_notes) + [
-            "fullenrich is reply-only; bulk max_tier capped at prospeo"
-        ]
+        max_notes = list(max_notes) + [FULLENRICH_BULK_WARNING]
+    skip.discard("fullenrich")
+    from email_waterfall.it_lane import load_client_profile
+
+    profile = load_client_profile(client.tag)
     control_warnings = max_notes + skip_notes
     ceiling = resolve_approve_cost_usd(
         approve_cost_usd, default=DEFAULT_APPROVE_COST_USD
@@ -503,6 +508,9 @@ def enrich_waterfall(
         warnings=control_warnings,
         deprecated_max_tier=deprecated_max,
         deprecated_tiers=deprecated_skip,
+        allow_fullenrich=False,
+        it_lane=it_lane,
+        client_profile=profile,
     )
     if estimate_only:
         return quote
@@ -571,9 +579,12 @@ def enrich_waterfall(
         caps=need_caps,
         skip_tiers=skip,
         approve_cost_usd=ceiling,
+        allow_fullenrich=False,
+        it_lane=it_lane,
+        client_profile=profile,
     )
     wf.modes = classify_rows(parsed)
-    wf.control_warnings = control_warnings
+    wf.control_warnings = list(control_warnings)
     wf.deprecated_max_tier = deprecated_max
     wf.deprecated_tiers = deprecated_skip
     wf.estimated_cost_usd = estimated_usd

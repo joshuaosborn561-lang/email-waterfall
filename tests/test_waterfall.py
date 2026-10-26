@@ -338,9 +338,11 @@ def test_apify_is_not_a_real_tier() -> None:
     assert "leadmagic" not in waterfall.TIER_ORDER
     assert waterfall.normalize_max_tier("apify") == "getleads"
     assert waterfall.TIER_ORDER == [
+        "blitz",
         "getleads",
         "smartlead",
         "aiark",
+        "pattern",
         "prospeo",
         "fullenrich",
     ]

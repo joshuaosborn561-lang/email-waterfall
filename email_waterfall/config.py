@@ -35,6 +35,9 @@ class Settings:
     veriphone_api_key: str
     smartlead_api_key: str
     smartlead_base_url: str
+    millionverifier_api_key: str = ""
+    blitz_api_key: str = ""
+    serper_api_key: str = ""
 
     @property
     def supabase_key(self) -> str:
@@ -68,6 +71,9 @@ def load_settings() -> Settings:
             "SMARTLEAD_FIND_EMAIL_BASE_URL",
             "https://prospect-api.smartlead.ai/api/v1/search-email-leads",
         ).rstrip("/"),
+        millionverifier_api_key=_env("MILLIONVERIFIER_API_KEY"),
+        blitz_api_key=_env("BLITZ_API_KEY"),
+        serper_api_key=_env("SERPER_API_KEY"),
     )
 
 

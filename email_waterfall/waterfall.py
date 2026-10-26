@@ -1,7 +1,9 @@
 """DM / work-email enrichment waterfall.
 
 Tiers (fixed, no Maps, no website crawl, no Apify):
-  getleads → Smartlead → AI Ark → Prospeo → FullEnrich
+  bulk IT rows:    [find LinkedIn] → Blitz → getleads → Smartlead → AI Ark → pattern → Prospeo
+  bulk other rows: getleads → Smartlead → AI Ark → pattern → Prospeo
+  ReplyHandler (enrich_person / /enrich-one): same, then FullEnrich
 
 Implementation is split under email_waterfall._wf so GitHub MCP can
 upload the modules. This module stays the public import surface.
@@ -13,6 +15,9 @@ from . import source as table_source
 from . import supabase_sync
 from .clients import ensure_client
 from .vendors.ai_ark import AiArkClient
+from .vendors.blitz import BlitzClient
+from .vendors.pattern import PatternGuessClient
+from .vendors.serper import SerperClient
 from .vendors.fullenrich import FullEnrichClient
 from .vendors.getleads import GetLeadsClient
 from .vendors.prospeo import ProspeoClient
@@ -47,6 +52,9 @@ from ._wf.row import _enrich_one_row, _write_company_contact
 
 __all__ = [
     "AiArkClient",
+    "BlitzClient",
+    "PatternGuessClient",
+    "SerperClient",
     "FullEnrichClient",
     "GetLeadsClient",
     "ProspeoClient",

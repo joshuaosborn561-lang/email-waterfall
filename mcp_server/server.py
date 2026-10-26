@@ -493,8 +493,27 @@ def enrich_waterfall(
     find_phone: bool | None = None,
     skip_tiers: str | list[str] | None = None,
     approve_cost_usd: float | None = 5.0,
+    it_lane: bool | None = None,
 ) -> str:
     """Resolve DMs + work emails + cellphones via paid vendors; write public.{client}_*.
+
+    Bulk email tier order (FullEnrich is ReplyHandler only, never here):
+      IT rows:    [find LinkedIn] -> blitz -> getleads -> smartlead -> aiark -> pattern -> prospeo
+      other rows: getleads -> smartlead -> aiark -> pattern -> prospeo
+    A row is IT when (first match wins): it_lane=true on this call; the
+    client's wf_client_profiles profile has it_lane: true; or the title
+    matches IT_TITLE_PATTERNS (CIO, CTO, IT director, network, systems, ...;
+    nurse / sales / recruit / HR excluded). IT rows with no linkedin_url get
+    one resolved first: getleads contact match -> Blitz domain-to-linkedin +
+    IT employee-finder -> Serper (site:linkedin.com/in), first confident
+    first+last match wins, written back to the row; a miss continues at
+    getleads. Blitz is prepaid records ($0); job stops using it on a 402 or
+    when records_remaining < BLITZ_MIN_RECORDS_LEFT. `pattern` guesses one
+    address in the domain's known format (public.domain_email_patterns) and
+    keeps it only on MillionVerifier `ok`; unknown or catch-all domains are
+    never guessed. Every found email still goes through Email Verifier
+    Progression before Smartlead. max_tier='fullenrich' is capped at prospeo
+    with warning "fullenrich is reply-handler only; capped at prospeo".
 
     Pass either `rows` or `source_table`/`source`, never both. Response is
     counts / job_id / cost only — never row payloads.
@@ -506,8 +525,8 @@ def enrich_waterfall(
     `rows` = JSON list of {domain?, company_name?, first_name?, last_name?, title?,
     email?, linkedin_url?, phone?, cellphone?, mobile?, place_id?, city?, state?}.
     Domain OR (first_name + last_name + company_name) is required. Name+company
-    rows use GetLeads enrich_person_batch, skip Smartlead, then AI Ark →
-    Prospeo → FullEnrich. company_name is passed to FullEnrich verbatim.
+    rows use GetLeads enrich_person_batch, skip Smartlead and pattern (they
+    need a domain), then AI Ark -> Prospeo.
 
     `source` = optional richer object {project_id, schema?, table, where?,
     key_column?, map?, limit?, cursor?}. Mutually exclusive with rows.
@@ -548,8 +567,8 @@ def enrich_waterfall(
     contacts.line_type). Existing contact rows upsert on the person key
     (client_tag, domain, first_name_key, last_name_key), not inserted again.
     max_tier caps depth independently.
-    max_tier = 'getleads' | 'smartlead' | 'aiark' | 'prospeo' | 'fullenrich'
-    (default 'prospeo'). Legacy LeadMagic names (leadmagic / lm / lead_magic)
+    max_tier = 'blitz' | 'getleads' | 'smartlead' | 'aiark' | 'pattern' |
+    'prospeo' (default 'prospeo'). skip_tiers='blitz' / 'pattern' turn those off. Legacy LeadMagic names (leadmagic / lm / lead_magic)
     are accepted as a no-op warning and map to the old AI Ark ceiling.
     approve_cost_usd (default 5.0) estimates first and refuses if the quote
     exceeds the ceiling; a run that would go over stops with
@@ -600,6 +619,7 @@ def enrich_waterfall(
             find_phone=find_phone,
             skip_tiers=skip_tiers,
             approve_cost_usd=approve_cost_usd,
+            it_lane=it_lane,
         )
 
     def _run(job: Any) -> dict[str, Any]:
@@ -675,16 +695,19 @@ def enrich_person(
     company_name: str = "",
     domain: str = "",
     need: str = "both",
-    max_tier: str = "prospeo",
+    max_tier: str = "fullenrich",
     write_supabase: bool = False,
     approve_cost_usd: float | None = 0.25,
     skip_tiers: str | list[str] | None = None,
+    it_lane: bool | None = None,
 ) -> str:
     """Look up one prospect through the waterfall and return that compact hit.
 
     For ReplyHandler Slack cards. Returns email / phone / linkedin_url /
-    website / source tiers — not a bulk payload dump. FullEnrich is reply-only:
-    this tool stops at Prospeo; only ReplyHandler's /enrich-one uses FullEnrich.
+    website / source tiers — not a bulk payload dump. This is the ReplyHandler
+    single-person path, the only place FullEnrich runs (email + cellphone),
+    after Prospeo. Same IT / Blitz / pattern rules as enrich_waterfall;
+    it_lane=true forces the person to IT.
     Default write_supabase=false so a Slack-card lookup does not create
     {tag}_wf_* rows unless asked.
     """
@@ -704,11 +727,11 @@ def enrich_person(
                 company_name=company_name,
                 domain=domain,
                 need=need,
-                # FullEnrich is reply-only (ReplyHandler POST /enrich-one).
-                max_tier=("prospeo" if wf.normalize_max_tier(max_tier) == "fullenrich" else max_tier),
+                max_tier=max_tier,
                 write_supabase=bool(write_supabase),
                 approve_cost_usd=approve_cost_usd,
                 skip_tiers=skip_tiers,
+                it_lane=it_lane,
             )
         )
     except Exception as exc:
@@ -780,6 +803,7 @@ def _mount_http_routes() -> None:
                 write_supabase=bool(body.get("write_supabase") or False),
                 approve_cost_usd=body.get("approve_cost_usd"),
                 skip_tiers=body.get("skip_tiers"),
+                it_lane=body.get("it_lane"),
             )
         except Exception as exc:
             return JSONResponse(

@@ -346,13 +346,18 @@ def _tier_warnings(
 
 def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]:
     for name, vendor in (
+        ("blitz", getattr(wf, "blitz", None)),
         ("getleads", wf.getleads),
         ("smartlead", wf.smartlead),
         ("aiark", wf.ai_ark),
+        ("pattern", getattr(wf, "pattern", None)),
         ("prospeo", wf.prospeo),
         ("fullenrich", wf.fullenrich),
         ("veriphone", wf.veriphone),
     ):
+        if vendor is None:
+            continue
+        wf.tier_stats.setdefault(name, {"calls": 0, "email_hits": 0, "dm_hits": 0, "phone_hits": 0, "errors": 0})
         wf.tier_stats[name]["vendor_calls"] = _int_attr(vendor, "calls")
         wf.tier_stats[name]["vendor_hits"] = _int_attr(vendor, "hits")
         wf.tier_stats[name]["errors"] = _int_attr(vendor, "errors")
@@ -404,6 +409,16 @@ def _tier_breakdown(wf: Waterfall, max_tier_n: str) -> dict[str, dict[str, Any]]
         if stats.get("disabled"):
             row["disabled"] = True
             row["disabled_reason"] = stats.get("disabled_reason")
+        if tier_name == "fullenrich" and not getattr(wf, "allow_fullenrich", True):
+            row["allowed_by_max_tier"] = False
+            row["reply_handler_only"] = True
+        if tier_name == "blitz":
+            remaining = getattr(getattr(wf, "blitz", None), "records_remaining", None)
+            row["records_remaining"] = remaining if isinstance(remaining, (int, float)) else None
+            bstats = getattr(wf, "blitz_stats", {}) or {}
+            row["it_rows_by_reason"] = dict(bstats.get("it_rows_by_reason") or {})
+            row["linkedin_found_by"] = dict(bstats.get("linkedin_found_by") or {})
+            row["linkedin_lookup_misses"] = int(bstats.get("linkedin_lookup_misses") or 0)
         tier_breakdown[tier_name] = row
     return tier_breakdown
 
@@ -464,16 +479,22 @@ def _result_payload(
             if getattr(wf, "stopped_at_ceiling", False)
             else STATUS_COMPLETED
         ),
+        "blitz": dict(getattr(wf, "blitz_stats", {}) or {}),
         "vendors_enabled": {
+            "blitz": bool(getattr(getattr(wf, "blitz", None), "enabled", False))
+            and tier_allowed("blitz", max_tier_n, getattr(wf, "skip_tiers", None)),
             "getleads": wf.getleads.enabled
             and tier_allowed("getleads", max_tier_n, getattr(wf, "skip_tiers", None)),
             "smartlead": wf.smartlead.enabled
             and tier_allowed("smartlead", max_tier_n, getattr(wf, "skip_tiers", None)),
             "aiark": wf.ai_ark.enabled
             and tier_allowed("aiark", max_tier_n, getattr(wf, "skip_tiers", None)),
+            "pattern": bool(getattr(getattr(wf, "pattern", None), "enabled", False))
+            and tier_allowed("pattern", max_tier_n, getattr(wf, "skip_tiers", None)),
             "prospeo": wf.prospeo.enabled
             and tier_allowed("prospeo", max_tier_n, getattr(wf, "skip_tiers", None)),
             "fullenrich": wf.fullenrich.enabled
+            and bool(getattr(wf, "allow_fullenrich", True))
             and tier_allowed("fullenrich", max_tier_n, getattr(wf, "skip_tiers", None)),
             "veriphone": bool(wf.veriphone.enabled),
         },
