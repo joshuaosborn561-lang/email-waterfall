@@ -63,40 +63,59 @@ create table if not exists public.domain_email_pattern_sources (
 -- Same rules as email_waterfall.names / vendors.pattern.build().
 create extension if not exists unaccent with schema extensions;
 
+-- plpgsql (not SQL) so the plans are cached; SQL-language versions are
+-- re-planned per row and far too slow over the contacts tables.
 create or replace function public.ew_name_tokens(p text)
-returns text[] language sql immutable as $$
-  select coalesce(array_agg(t order by ord), '{}')
-  from (
-    select regexp_replace(tok, '[^a-z]', '', 'g') as t, ord
-    from regexp_split_to_table(lower(extensions.unaccent(coalesce(p, ''))), '[\s,]+')
-      with ordinality as x(tok, ord)
-  ) s
-  where t <> '' and t not in ('dr','mr','mrs','ms','miss','mx','prof','rev','sir');
-$$;
+returns text[] language plpgsql immutable parallel safe as $$
+declare
+  out_t text[] := '{}';
+  tok text;
+begin
+  foreach tok in array regexp_split_to_array(lower(extensions.unaccent(coalesce(p, ''))), '[\s,]+') loop
+    tok := regexp_replace(tok, '[^a-z]', '', 'g');
+    if tok <> '' and tok not in ('dr','mr','mrs','ms','miss','mx','prof','rev','sir') then
+      out_t := out_t || tok;
+    end if;
+  end loop;
+  return out_t;
+end $$;
 
 create or replace function public.ew_norm_first(p text)
-returns text language sql immutable as $$
-  select coalesce(
-    (select t from unnest(public.ew_name_tokens(p)) with ordinality u(t, o) where length(t) >= 2 order by o limit 1),
-    (public.ew_name_tokens(p))[1],
-    ''
-  );
-$$;
+returns text language plpgsql immutable parallel safe as $$
+declare
+  toks text[] := public.ew_name_tokens(p);
+  tok text;
+begin
+  foreach tok in array toks loop
+    if length(tok) >= 2 then
+      return tok;
+    end if;
+  end loop;
+  return coalesce(toks[1], '');
+end $$;
 
 create or replace function public.ew_norm_last(p text)
-returns text language sql immutable as $$
-  select coalesce(
-    (select t from unnest(public.ew_name_tokens(p)) with ordinality u(t, o)
-     where t not in ('jr','sr','ii','iii','iv','md','phd','rn','dnp','mba','fache','cpa','do','np')
-     order by o desc limit 1),
-    ''
-  );
-$$;
+returns text language plpgsql immutable parallel safe as $$
+declare
+  toks text[] := public.ew_name_tokens(p);
+  i int;
+begin
+  for i in reverse coalesce(array_length(toks, 1), 0) .. 1 loop
+    if toks[i] not in ('jr','sr','ii','iii','iv','md','phd','rn','dnp','mba','fache','cpa','do','np') then
+      return toks[i];
+    end if;
+  end loop;
+  return '';
+end $$;
 
 create or replace function public.ew_email_pattern(p_local text, p_first text, p_last text)
-returns text language sql immutable as $$
-  select case
-    when length(f) < 2 or length(l) < 2 then null
+returns text language plpgsql immutable parallel safe as $$
+declare
+  f text := public.ew_norm_first(p_first);
+  l text := public.ew_norm_last(p_last);
+begin
+  if length(f) < 2 or length(l) < 2 then return null; end if;
+  return case
     when p_local = f || '.' || l then 'first.last'
     when p_local = f || '_' || l then 'first_last'
     when p_local = f || '-' || l then 'first-last'
@@ -108,9 +127,8 @@ returns text language sql immutable as $$
     when p_local = l || left(f, 1) then 'lastf'
     when p_local = f then 'first'
     else null
-  end
-  from (select public.ew_norm_first(p_first) f, public.ew_norm_last(p_last) l) n;
-$$;
+  end;
+end $$;
 
 -- Rebuild counts from verified emails we already hold. Never flips
 -- is_catch_all back to false. Returns rows upserted.
