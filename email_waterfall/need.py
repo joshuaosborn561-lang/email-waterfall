@@ -48,9 +48,11 @@ NEED_CAPABILITIES: dict[str, frozenset[str]] = {
 }
 
 EMAIL_VENDORS = (
+    "blitz",
     "getleads",
     "smartlead",
     "aiark",
+    "pattern",
     "prospeo",
     "fullenrich",
 )

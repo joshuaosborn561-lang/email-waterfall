@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from typing import Any
 
 log = logging.getLogger("email_waterfall.waterfall")
@@ -18,6 +21,7 @@ from email_waterfall.need import (
     normalize_need,
     set_need,
 )
+from email_waterfall.it_lane import it_row_reason
 from email_waterfall.people import looks_like_person, pick_best_person, title_rank
 from email_waterfall.vendors.base import EmailHit, PersonHit, PhoneHit
 from email_waterfall.vendors.getleads import is_identifier_validation_error
@@ -43,6 +47,19 @@ def _host():
     return w
 
 
+# Each LinkedIn resolver step gets its own wall-clock budget; a slow or hung
+# step is abandoned and the row falls through (never stalls the job).
+_RESOLVER_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="li-resolver")
+
+
+def linkedin_step_timeout() -> float:
+    raw = (os.environ.get("LINKEDIN_STEP_TIMEOUT_S") or "").strip()
+    try:
+        return max(0.05, float(raw)) if raw else 20.0
+    except ValueError:
+        return 20.0
+
+
 def _int_attr(obj: Any, name: str) -> int:
     val = getattr(obj, name, 0)
     try:
@@ -61,6 +78,12 @@ class Waterfall:
         prospeo: Any = None,
         fullenrich: Any = None,
         veriphone: Any = None,
+        pattern: Any = None,
+        blitz: Any = None,
+        serper: Any = None,
+        allow_fullenrich: bool = False,
+        it_lane: bool | None = None,
+        client_profile: dict[str, Any] | None = None,
         max_tier: str = DEFAULT_MAX_TIER,
         target_titles: list[str] | None = None,
         fallback_titles: frozenset[str] | None = None,
@@ -78,6 +101,21 @@ class Waterfall:
         self.prospeo = prospeo or h.ProspeoClient()
         self.fullenrich = fullenrich or h.FullEnrichClient()
         self.veriphone = veriphone or h.VeriphoneClient()
+        self.pattern = pattern or h.PatternGuessClient()
+        self.blitz = blitz or h.BlitzClient()
+        self.serper = serper or h.SerperClient()
+        # FullEnrich is ReplyHandler only: true only from enrich_one_person.
+        self.allow_fullenrich = bool(allow_fullenrich)
+        self.it_lane = it_lane
+        self.client_profile = client_profile
+        self.control_warnings: list[str] = []
+        self._blitz_checked = False
+        self._blitz_ok = False
+        self.blitz_stats: dict[str, Any] = {
+            "it_rows_by_reason": {},
+            "linkedin_found_by": {},
+            "linkedin_lookup_misses": 0,
+        }
         self.max_tier = normalize_max_tier(max_tier)
         self.skip_tiers = set(skip_tiers or ())
         self.approve_cost_usd = resolve_approve_cost_usd(
@@ -102,6 +140,8 @@ class Waterfall:
             "prospeo": _empty_stats(),
             "fullenrich": _empty_stats(),
             "veriphone": _empty_stats(),
+            "pattern": _empty_stats(),
+            "blitz": _empty_stats(),
         }
         self.suppressed_by_need: dict[str, int] = {}
         self._row_attempts: set[tuple[str, int]] = set()
@@ -199,6 +239,8 @@ class Waterfall:
     def _allowed(self, tier: str) -> bool:
         if self.stopped_at_ceiling:
             return False
+        if tier == "fullenrich" and not self.allow_fullenrich:
+            return False
         if tier in self._circuit_disabled:
             return False
         return tier_allowed(tier, self.max_tier, self.skip_tiers)
@@ -275,6 +317,135 @@ class Waterfall:
             str(row.get("ai_ark_id") or ""),
         )
 
+    # -- IT lane / Blitz -----------------------------------------------------
+    def it_reason(self, row: dict[str, Any]) -> str | None:
+        """IT decision for a row (param > profile > title), counted once per row."""
+        if "_it_reason" in row:
+            return row["_it_reason"]
+        reason = it_row_reason(row, self.client_profile, self.it_lane)
+        row["_it_reason"] = reason
+        if reason:
+            with self._lock:
+                by = self.blitz_stats["it_rows_by_reason"]
+                by[reason] = by.get(reason, 0) + 1
+        return reason
+
+    def _disable_tier(self, tier: str, reason: str, warning: str | None = None) -> None:
+        with self._lock:
+            if tier in self._circuit_disabled:
+                return
+            self._circuit_disabled[tier] = reason
+            st = self.tier_stats.setdefault(tier, _empty_stats())
+            st["disabled"] = True
+            st["disabled_reason"] = reason
+            if warning and warning not in self.control_warnings:
+                self.control_warnings.append(warning)
+        log.warning("tier disabled tier=%s reason=%s", tier, reason)
+
+    def _blitz_ready(self) -> bool:
+        """Records guard: key-info once per job; refuse under BLITZ_MIN_RECORDS_LEFT."""
+        if not getattr(self.blitz, "enabled", False):
+            return False
+        with self._lock:
+            if self._blitz_checked:
+                return self._blitz_ok
+            self._blitz_checked = True
+        from email_waterfall.vendors.blitz import min_records_left
+
+        ok = True
+        info_fn = getattr(self.blitz, "key_info", None)
+        info = None
+        if callable(info_fn):
+            try:
+                info = info_fn()
+            except Exception:
+                info = None
+        remaining = getattr(self.blitz, "records_remaining", None)
+        if isinstance(info, dict) and isinstance(info.get("records_remaining"), (int, float)):
+            remaining = int(info["records_remaining"])
+        if isinstance(remaining, (int, float)):
+            self.blitz_stats["records_remaining_at_start"] = int(remaining)
+            floor = min_records_left()
+            if remaining < floor:
+                ok = False
+                self._disable_tier(
+                    "blitz",
+                    f"records_remaining {int(remaining)} < BLITZ_MIN_RECORDS_LEFT {floor}",
+                    f"blitz: only {int(remaining)} records left; tier skipped",
+                )
+        if getattr(self.blitz, "out_of_records", False):
+            ok = False
+            self._disable_tier("blitz", "out of records (402)", "blitz: out of records")
+        with self._lock:
+            self._blitz_ok = ok
+        return ok
+
+    def _note_blitz(self) -> None:
+        if getattr(self.blitz, "out_of_records", False):
+            self._disable_tier("blitz", "out of records (402)", "blitz: out of records")
+
+    def _pattern_known(self, domain: str) -> bool:
+        """No known format -> no attempt booked, no MillionVerifier call."""
+        fn = getattr(self.pattern, "lookup_pattern", None)
+        if not callable(fn):
+            return True
+        try:
+            return bool(fn(domain))
+        except Exception:
+            return False
+
+    def _timed(self, fn, *args) -> str:
+        """Run one resolver step with a timeout; '' on timeout or error."""
+        fut = _RESOLVER_POOL.submit(fn, *args)
+        try:
+            out = fut.result(timeout=linkedin_step_timeout())
+        except FutureTimeout:
+            log.warning("linkedin resolver step timed out fn=%s", getattr(fn, "__name__", fn))
+            return ""
+        except Exception as exc:
+            log.warning("linkedin resolver step failed err=%s", str(exc)[:200])
+            return ""
+        return out if isinstance(out, str) else ""
+
+    def resolve_linkedin(self, row: dict[str, Any]) -> str:
+        """IT row with no LinkedIn URL: getleads -> Blitz company/employees -> Serper.
+
+        Stops at the first confident name match and writes the URL back to
+        the row so later tiers can use it. Never blocks the row.
+        """
+        first, last = row.get("first_name") or "", row.get("last_name") or ""
+        domain = row.get("domain") or ""
+        company = row.get("company_name") or ""
+        if not (first and last and (domain or company)):
+            return ""
+        url, found_by = "", ""
+        if self.getleads.enabled and self._allowed("getleads"):
+            fn = getattr(self.getleads, "find_linkedin", None)
+            if callable(fn):
+                url = self._timed(fn, first, last, domain, company)
+                found_by = "getleads" if url else ""
+        if not url and domain and self._allowed("blitz") and self._blitz_ready():
+            url = self._timed(self.blitz.find_linkedin, first, last, domain)
+            self._note_blitz()
+            found_by = "blitz" if url else ""
+        if (
+            not url
+            and getattr(self.serper, "enabled", False)
+            and self._allowed("blitz")
+            and self._bump_attempt("serper", row)
+        ):
+            url = self._timed(self.serper.find_linkedin, first, last, company, domain)
+            found_by = "serper" if url else ""
+        if url and "linkedin.com/in/" in url:
+            row["linkedin_url"] = url
+            with self._lock:
+                by = self.blitz_stats["linkedin_found_by"]
+                by[found_by] = by.get(found_by, 0) + 1
+            return url
+        with self._lock:
+            self.blitz_stats["linkedin_lookup_misses"] += 1
+        return ""
+
     def resolve_email(
         self, row: dict[str, Any], *, include_fullenrich: bool = True
     ) -> EmailHit | None:
@@ -305,8 +476,38 @@ class Waterfall:
 
         hit: EmailHit | None = None
 
+        # Blitz first for IT rows (Josh, Oct 23 2026). Find the LinkedIn URL
+        # first when it is missing (Oct 25 2026).
+        is_it = bool(self.it_reason(row))
+        if (
+            is_it
+            and not linkedin
+            and self.blitz.enabled
+            and self._allowed("blitz")
+            and self._blitz_ready()
+        ):
+            linkedin = self.resolve_linkedin(row)
+        if (
+            not hit
+            and is_it
+            and linkedin
+            and self.blitz.enabled
+            and self._allowed("blitz")
+            and self._blitz_ready()
+            and self._bump_attempt("blitz", row)
+        ):
+            before_e = _int_attr(self.blitz, "errors")
+            hit = self.blitz.find_email(linkedin)
+            self._note_circuit("blitz", _int_attr(self.blitz, "errors") > before_e)
+            self._note_blitz()
+            if hit:
+                self._bump("blitz", "email_hits")
+                _fill_row_domain(row, email=hit.email, raw=hit.raw)
+                domain = row.get("domain") or domain
+                has_name_domain = bool(first and last and domain)
+
         can_getleads = bool(linkedin or (first and last and (domain or company)))
-        if can_getleads and self.getleads.enabled and self._allowed("getleads"):
+        if not hit and can_getleads and self.getleads.enabled and self._allowed("getleads"):
             before = _int_attr(self.getleads, "calls")
             before_e = _int_attr(self.getleads, "errors")
             hit = self.getleads.find_email(
@@ -363,6 +564,20 @@ class Waterfall:
                 self._bump("aiark", "email_hits")
                 _fill_row_domain(row, email=hit.email, raw=hit.raw)
                 domain = row.get("domain") or domain
+
+        if (
+            not hit
+            and has_name_domain
+            and self.pattern.enabled
+            and self._allowed("pattern")
+            and self._pattern_known(domain)
+            and self._bump_attempt("pattern", row)
+        ):
+            before_e = _int_attr(self.pattern, "errors")
+            hit = self.pattern.find_email(first, last, domain)
+            self._note_circuit("pattern", _int_attr(self.pattern, "errors") > before_e)
+            if hit:
+                self._bump("pattern", "email_hits")
 
         can_prospeo = bool(linkedin or has_name_domain or has_name_company)
         if (

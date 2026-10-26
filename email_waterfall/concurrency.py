@@ -30,6 +30,9 @@ TIER_ENV_KEYS: dict[str, str] = {
     "prospeo": "PROSPEO_CONCURRENCY",
     "fullenrich": "FULLENRICH_CONCURRENCY",
     "veriphone": "VERIPHONE_CONCURRENCY",
+    "pattern": "PATTERN_CONCURRENCY",
+    "blitz": "BLITZ_CONCURRENCY",
+    "serper": "SERPER_CONCURRENCY",
 }
 
 DEFAULT_VENDOR_LIMITS: dict[str, int] = {
@@ -39,6 +42,10 @@ DEFAULT_VENDOR_LIMITS: dict[str, int] = {
     "prospeo": 6,
     "fullenrich": 4,
     "veriphone": 8,
+    "pattern": 8,
+    # Blitz Start plan allows 10 requests/sec per endpoint.
+    "blitz": 8,
+    "serper": 4,
 }
 
 CROSS_PROCESS_TIERS = frozenset({"smartlead"})

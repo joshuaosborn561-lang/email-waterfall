@@ -28,7 +28,9 @@ def test_estimate_includes_usd_and_default_ceiling(monkeypatch) -> None:
     assert out["estimated_cost_usd"] > 0
     assert "usd_est" in out["estimate"]["aiark"]
     assert "usd_est" in out["estimate"]["prospeo"]
-    assert "fullenrich" not in out["estimate"]
+    # Bulk quotes show FullEnrich as not allowed at $0 (ReplyHandler only).
+    assert out["estimate"]["fullenrich"]["allowed"] is False
+    assert out["estimate"]["fullenrich"]["usd_est"] == 0.0
 
 
 def test_refuse_when_estimate_exceeds_ceiling(monkeypatch) -> None:

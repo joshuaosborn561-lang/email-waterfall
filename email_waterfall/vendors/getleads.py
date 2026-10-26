@@ -1153,6 +1153,57 @@ class GetLeadsClient:
             self.hits += 1
         return out
 
+    def find_linkedin(
+        self, first: str, last: str, domain: str = "", company_name: str = ""
+    ) -> str:
+        """LinkedIn URL for one person via the free contact lookup.
+
+        Domain first, company name as the fallback. Accepted only when first +
+        last match after normalization and the contact's company domain (when
+        reported) matches. Part of the email path, so no people capability.
+        """
+        from email_waterfall.names import names_match
+
+        if not self.enabled or not (first and last and (domain or company_name)):
+            return ""
+        try:
+            tools = self.list_tools()
+        except Exception as exc:
+            bump_errors(self, error=str(exc))
+            return ""
+        tool = pick_tool(tools, score_people_tool)
+        if not tool:
+            return ""
+        dom = (domain or "").strip().lower()
+        for ident in (
+            people_lookup_values(dom, "") if dom else {},
+            people_lookup_values("", company_name) if company_name else {},
+        ):
+            if not ident:
+                continue
+            data = self._call(tool, {**ident, "size": 50})
+            if not data:
+                continue
+            for row in unwrap_decision_makers(data):
+                mapped = normalize_decision_maker(row)
+                person = person_from_row(mapped, self.tier)
+                if not person or not names_match(
+                    first, last, person.first_name, person.last_name
+                ):
+                    continue
+                raw = person.raw or {}
+                cdom = str(
+                    raw.get("company_domain") or raw.get("domain") or ""
+                ).strip().lower()
+                if cdom.startswith("www."):
+                    cdom = cdom[4:]
+                if dom and cdom and cdom != dom:
+                    continue
+                url = (person.linkedin_url or "").strip()
+                if "linkedin.com/in/" in url:
+                    return url
+        return ""
+
     def search_people(
         self, filters: dict, *, page: int = 0, size: int = 100
     ) -> dict[str, Any]:

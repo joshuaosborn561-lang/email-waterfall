@@ -56,6 +56,7 @@ def enrich_one_person(
     write_supabase: bool = False,
     approve_cost_usd: float | int | str | None = None,
     skip_tiers: Any = None,
+    it_lane: bool | None = None,
 ) -> dict[str, Any]:
     """Run the waterfall for one prospect and return that compact hit.
 
@@ -74,6 +75,9 @@ def enrich_one_person(
         approve_cost_usd, default=DEFAULT_APPROVE_COST_USD_ONE
     )
     need_norm, need_caps = resolve_need(need)
+    from email_waterfall.it_lane import load_client_profile
+
+    profile = load_client_profile(client.tag)
     raw = {
         "email": email,
         "first_name": first_name,
@@ -110,6 +114,9 @@ def enrich_one_person(
         warnings=max_notes + skip_notes,
         deprecated_max_tier=deprecated_max,
         deprecated_tiers=deprecated_skip,
+        allow_fullenrich=True,
+        it_lane=it_lane,
+        client_profile=profile,
     )
     estimated_usd = float(quote.get("estimated_cost_usd") or 0.0)
     if estimated_usd > ceiling:
@@ -140,6 +147,10 @@ def enrich_one_person(
         caps=need_caps,
         skip_tiers=skip,
         approve_cost_usd=ceiling,
+        # ReplyHandler single-person path: the only place FullEnrich runs.
+        allow_fullenrich=True,
+        it_lane=it_lane,
+        client_profile=profile,
     )
     wf.control_warnings = max_notes + skip_notes
     wf.deprecated_max_tier = deprecated_max

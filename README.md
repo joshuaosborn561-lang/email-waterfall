@@ -22,9 +22,51 @@ Peterson / default owner titles: Owner, Founder, Principal, President, Partner, 
 
 ## Waterfall
 
+Bulk `enrich_waterfall` (email tiers):
+
 ```
-getleads → Smartlead → AI Ark → Prospeo → FullEnrich
+IT rows:    [find LinkedIn URL if missing] → Blitz → getleads → Smartlead → AI Ark → pattern → Prospeo
+other rows: getleads → Smartlead → AI Ark → pattern → Prospeo
 ```
+
+ReplyHandler single-person path (`enrich_person` / `POST /enrich-one`): the same order, then **FullEnrich** after Prospeo (email and cellphone). **FullEnrich is ReplyHandler only** (Josh, Oct 25 2026): bulk jobs never call it. A bulk `max_tier="fullenrich"` is treated as `prospeo` with the warning `fullenrich is reply-handler only; capped at prospeo`, `skip_tiers` containing it is a no-op, and bulk estimates show FullEnrich as `allowed: false`, `$0`. Internally this is the `allow_fullenrich` flag on `Waterfall`, true only from the enrich-one path.
+
+### Pattern tier
+
+When getleads, Smartlead and AI Ark all miss a person with first name + last name + domain, the pattern tier builds **one** address in the format that domain is already known to use (`public.domain_email_patterns`, migration `008`) and checks it with MillionVerifier (`GET https://api.millionverifier.com/api/v3/?api=…&email=…&timeout=10`). Only `result == "ok"` is kept (`wf_vendor=pattern`); anything else falls through to Prospeo. No known pattern, or a catch-all domain, means no guess and no MillionVerifier call — it never guesses blind. A `catch_all` verdict marks the domain `is_catch_all=true` so it is never guessed again (never flipped back automatically); an `ok` increments `n_verified`. Guesses are never routed to No2Bounce. Patterns: `flast`, `first.last`, `firstlast`, `firstl`, `first`, `first_last`, `f.last`, `lastf`, `last.first`, `first-last`. Names are normalized (accents and non a-z stripped, Dr/Mr/Ms titles and Jr/Sr/II/III/MD/PhD/RN/DNP/MBA/FACHE/CPA/DO/NP suffixes dropped; "R. Todd" → `todd`, "Smith MD" → `smith`). One MillionVerifier check per attempt, booked against `approve_cost_usd` at `MILLIONVERIFIER_USD_PER_CHECK` (default $0.0037) and included in `estimate_only`. `public.refresh_domain_email_patterns()` rebuilds the counts nightly (pg_cron, 08:15 UTC) from `*_wf_contacts` emails that appear in the verified sources listed in `public.domain_email_pattern_sources` (add a row there to add a source). Aliases: `pattern_guess`, `guess`, `mv_guess`. `max_tier="aiark"` excludes it; `skip_tiers="pattern"` turns it off.
+
+### Blitz tier (IT rows)
+
+Blitz runs **first** for IT rows (Josh, Oct 23 2026). A row is IT when (first match wins):
+
+1. `it_lane: true` is passed to `enrich_waterfall` / `enrich_person` / `POST /enrich-one` (forces every row in the job);
+2. the client's `public.wf_client_profiles.profile` has `"it_lane": true`;
+3. the row's title matches `IT_TITLE_PATTERNS` in `email_waterfall/it_lane.py` (CIO, CTO, CISO, IT director, network, systems, help desk, …), unless it hits an exclusion (nurse, nursing, sales, account executive, recruit, HR, human resources).
+
+The reason (`param` / `profile` / `title`) is counted in `blitz.it_rows_by_reason`.
+
+IT row with no `linkedin_url`: the URL is found first (Josh, Oct 25 2026), stopping at the first confident first + last name match (nickname or middle-initial difference allowed only when the last name matches exactly; never on last name alone):
+
+1. getleads contact lookup by domain (company name fallback), current company domain must match;
+2. Blitz `POST /v2/enrichment/domain-to-linkedin` (cached per domain per job, misses too) then `POST /v2/search/employee-finder` with `job_function: ["Information Technology"]`, `max_results: 50` (cached per company per job);
+3. Serper Google search `site:linkedin.com/in "<first> <last>" "<company>"`, top result only, title must carry both names and the title/snippet the company ($0.001 a query, booked against `approve_cost_usd`).
+
+Each step has a wall-clock budget (`LINKEDIN_STEP_TIMEOUT_S`, default 20s) and a timeout or error just falls through. A found URL is written back to the row (later tiers use it) and counted in `linkedin_found_by`; a miss counts `linkedin_lookup_misses` and the row continues at getleads with no Blitz call. Blitz email is `POST https://api.blitz-api.ai/v2/enrichment/email` (`x-api-key`), `wf_vendor=blitz` on hits. Blitz is the prepaid Start plan: $0 per call, records only. At job start `GET /v2/account/key-info` is read and the tier is refused when `records_remaining < BLITZ_MIN_RECORDS_LEFT` (default 2000); a 402 disables it for the rest of the job (`blitz: out of records` warning). 429/5xx back off 1.5s then 4s. `skip_tiers="blitz"` turns it off; aliases `blitzapi`, `blitz_api`.
+
+Every email from every tier, Blitz and pattern included, still goes through Email Verifier Progression before Smartlead. This service finds emails; it does not clear them for sending.
+
+### Env vars for the new tiers
+
+| Var | Purpose |
+| --- | --- |
+| `MILLIONVERIFIER_API_KEY` | pattern tier (enabled only with this and Supabase configured) |
+| `MILLIONVERIFIER_USD_PER_CHECK` | booked cost per check, default `0.0037` |
+| `PATTERN_CONCURRENCY` | in-flight MillionVerifier calls, default 8 |
+| `BLITZ_API_KEY` | Blitz tier |
+| `BLITZ_CONCURRENCY` | in-flight Blitz calls, default 8 (plan limit 10 req/s) |
+| `BLITZ_MIN_RECORDS_LEFT` | refuse Blitz under this many records, default 2000 |
+| `SERPER_API_KEY` | last LinkedIn resolver step |
+| `LINKEDIN_STEP_TIMEOUT_S` | per-step resolver budget, default 20 |
 
 **getleads** is first. The MCP at `https://app.getleads.io/api/mcp` accepts `GETLEADS_API_KEY` as a Bearer token. OAuth refresh tokens also work (`python scripts/getleads_auth.py`; rotating token in `public.ew_vendor_oauth_tokens`). Discovery (geography + industry + seniority + headcount) goes through the MCP tool `getleads_search`, which maps onto whatever people/lead-search tool `tools/list` actually exposes. `find_email` / `find_people` in the waterfall use the same live catalog — they return nothing (and log once) if no matching tool exists. Non-2xx and `isError` increment `tier_stats.*.errors` and never look like a quiet miss.
 
@@ -36,13 +78,13 @@ AI Ark is next on **people, email, and cellphone** (not people-only):
 - Email: LinkedIn URL, AI Ark person id, name + domain, and/or phone → `POST /v2/people/export/single`
 - Cellphone: LinkedIn URL or name + domain → `POST /v2/people/mobile-phone-finder` (5 credits on hit)
 
-Mobile order is **AI Ark → Prospeo → FullEnrich**. Vendor-found numbers are checked with Veriphone `GET /v2/verify` before they are accepted (`phone_valid` and `phone_type=mobile`). Landline / voip / invalid are dropped and the next finder is tried. FullEnrich is last-tier **email and cellphone** (`contact.work_emails` and `contact.phones`; skip `LANDLINE`).
+Mobile order is **AI Ark → Prospeo** (bulk) and **AI Ark → Prospeo → FullEnrich** (ReplyHandler path). Vendor-found numbers are checked with Veriphone `GET /v2/verify` before they are accepted (`phone_valid` and `phone_type=mobile`). Landline / voip / invalid are dropped and the next finder is tried. FullEnrich is last-tier **email and cellphone** (`contact.work_emails` and `contact.phones`; skip `LANDLINE`).
 
 On `need='phone'` (or `verify_only`), input numbers are also Veriphone-checked. The number and Veriphone `phone_type` are written back to the source table as `wf_phone` / `wf_phone_type` and to `{client}_*contacts.line_type`. Existing contact rows **upsert** on `(client_tag, domain, first_name_key, last_name_key)` so a re-run does not duplicate a null-email person. Set `VERIPHONE_API_KEY`.
 
 `verify_only=true` checks numbers already on the row with Veriphone and writes the verdict. Finder HTTP is skipped — use it to classify numbers you already have without paying later paid finders again.
 
-`max_tier` default is `prospeo`. Raise it to `fullenrich` (alias `fe`) for the last paid email/phone tier. Legacy LeadMagic names (`leadmagic`, `lm`, `lead_magic`) are accepted as a warning and map to the old AI Ark ceiling (stop before Prospeo). `skip_tiers` treats those names as no-ops.
+`max_tier` default is `prospeo` (order: `blitz`, `getleads`, `smartlead`, `aiark`, `pattern`, `prospeo`, `fullenrich`). `fullenrich` only applies on the ReplyHandler path. Legacy LeadMagic names (`leadmagic`, `lm`, `lead_magic`) are accepted as a warning and map to the old AI Ark ceiling (stop before Prospeo). `skip_tiers` treats those names as no-ops.
 
 `approve_cost_usd` defaults to **$5** on `enrich_waterfall` and **$0.25** on `enrich_person` / `POST /enrich-one`. The job estimates first and refuses when the quote exceeds the ceiling (`status=refused_over_ceiling`). A run that would go over mid-job stops with `status=stopped_at_ceiling`. Pass a higher number to raise the cap.
 
