@@ -41,6 +41,33 @@ def compact_person_hit(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_FE_OUTCOMES = {
+    "found", "no_match", "out_of_credits", "timeout", "error", "not_run",
+}
+
+
+def fullenrich_outcome(client: Any) -> dict[str, Any]:
+    """What FullEnrich did for the mobile lookup, for ReplyHandler's card line.
+
+    mobile: found | no_match (searched, nothing) | out_of_credits (402 /
+    CREDITS_INSUFFICIENT) | timeout (our poll window ran out) | error |
+    not_run (an earlier tier hit, the ceiling blocked it, or no key).
+    Defensive about non-str attributes so test doubles never leak through.
+    """
+    enabled = getattr(client, "enabled", False) is True
+    raw = getattr(client, "mobile_outcome", None)
+    mobile = raw if isinstance(raw, str) and raw in _FE_OUTCOMES else "not_run"
+    exhausted = getattr(client, "credits_exhausted", False) is True
+    if exhausted and mobile in {"no_match", "error", "timeout"}:
+        # A 402 seen on any call this lookup means credits are the problem.
+        mobile = "out_of_credits"
+    return {
+        "enabled": enabled,
+        "mobile": mobile,
+        "credits_exhausted": exhausted,
+    }
+
+
 def enrich_one_person(
     *,
     client_tag: str,
@@ -183,6 +210,7 @@ def enrich_one_person(
             },
         }
     )
+    hit["fullenrich"] = fullenrich_outcome(wf.fullenrich)
     if deprecated_max:
         hit["deprecated_max_tier"] = deprecated_max
     if deprecated_skip:
