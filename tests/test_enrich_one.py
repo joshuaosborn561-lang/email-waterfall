@@ -123,3 +123,51 @@ def test_mcp_exposes_enrich_person() -> None:
     assert params["need"].default == "both"
     assert params["approve_cost_usd"].default == 0.25
     assert params["client_tag"].default is inspect.Parameter.empty
+
+
+def test_enrich_one_reports_fullenrich_outcome(monkeypatch) -> None:
+    from email_waterfall._wf.one import fullenrich_outcome
+
+    class _FE:
+        enabled = True
+        mobile_outcome = None
+        credits_exhausted = False
+
+    fe = _FE()
+    assert fullenrich_outcome(fe) == {
+        "enabled": True, "mobile": "not_run", "credits_exhausted": False,
+    }
+    fe.mobile_outcome = "no_match"
+    assert fullenrich_outcome(fe)["mobile"] == "no_match"
+    fe.mobile_outcome = "no_match"
+    fe.credits_exhausted = True
+    assert fullenrich_outcome(fe)["mobile"] == "out_of_credits"
+    fe.mobile_outcome = "found"
+    assert fullenrich_outcome(fe)["mobile"] == "found"
+    fe.enabled = False
+    fe.mobile_outcome = "garbage"
+    assert fullenrich_outcome(fe)["mobile"] == "not_run"
+    assert fullenrich_outcome(fe)["enabled"] is False
+
+
+def test_enrich_one_hit_has_fullenrich_block_even_with_test_doubles(monkeypatch) -> None:
+    ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))
+    ark.find_mobile.return_value = PhoneHit(phone="+12015550100", source_tier="aiark")
+    _patch_clients(
+        monkeypatch,
+        gl=_vendor(email=None),
+        ark=ark,
+        lm=_vendor(enabled=True),
+        fe=_vendor(enabled=True),
+    )
+    hit = waterfall.enrich_one_person(
+        client_tag="replyhandler",
+        email="jane@roofco.com",
+        full_name="Jane Smith",
+        need="both",
+        max_tier="fullenrich",
+        write_supabase=False,
+    )
+    assert hit["fullenrich"] == {
+        "enabled": True, "mobile": "not_run", "credits_exhausted": False,
+    }

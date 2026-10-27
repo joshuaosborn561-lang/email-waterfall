@@ -29,6 +29,11 @@ class FullEnrichClient:
         self.hits = 0
         self.credits_used = 0
         self.errors = 0
+        # Why a lookup came back empty. Read by enrich_one_person so a card can
+        # say "out of credits" instead of silently showing no phone.
+        self.credits_exhausted = False
+        self.mobile_outcome: str | None = None
+        self._poll_state = ""
 
     @property
     def enabled(self) -> bool:
@@ -171,7 +176,23 @@ class FullEnrichClient:
             self.credits_used += 1
             if orig_idx >= 0:
                 by_idx[orig_idx] = hit
+        self.mobile_outcome = self._outcome(found=bool(by_idx))
         return [by_idx.get(i) for i in range(len(rows))]
+
+    def _outcome(self, *, found: bool) -> str:
+        """found | no_match | out_of_credits | timeout | error | not_run."""
+        if found:
+            return "found"
+        state = self._poll_state
+        if state == "credits":
+            return "out_of_credits"
+        if state == "timeout":
+            return "timeout"
+        if state in {"failed", "transport"}:
+            return "error"
+        if state == "finished":
+            return "no_match"
+        return "not_run"
 
     def _row_payload(
         self, row: dict[str, str], idx: int, fields: list[str]
@@ -216,6 +237,7 @@ class FullEnrichClient:
                 continue
             index_map[i] = i
             data.append(payload)
+        self._poll_state = ""
         if not data:
             return [], {}
 
@@ -230,14 +252,20 @@ class FullEnrichClient:
         )
         if r is None:
             record_response_failure(self, url, None)
+            self._poll_state = "transport"
             return [], {}
         try:
             if r.status_code >= 400:
                 record_response_failure(self, url, r)
+                if r.status_code == 402:
+                    self._mark_credits_exhausted()
+                else:
+                    self._poll_state = "failed"
                 return [], {}
             accepted = r.json()
         except ValueError:
             record_response_failure(self, url, r, error="non-json")
+            self._poll_state = "failed"
             return [], {}
 
         enrichment_id = (
@@ -246,6 +274,7 @@ class FullEnrichClient:
             or (accepted.get("data") or {}).get("enrichment_id")
         )
         if not enrichment_id:
+            self._poll_state = "failed"
             return [], {}
         finished = self._poll(
             str(enrichment_id), poll_seconds=poll_seconds, max_wait=max_wait
@@ -267,6 +296,13 @@ class FullEnrichClient:
             out.append((contact, index_map.get(idx, idx)))
         return out
 
+    def _mark_credits_exhausted(self) -> None:
+        self.credits_exhausted = True
+        self._poll_state = "credits"
+        self.errors += 1
+        if not getattr(self, "first_error", None):
+            self.first_error = "fullenrich: credits insufficient (402)"
+
     def _poll(
         self, enrichment_id: str, *, poll_seconds: float, max_wait: float
     ) -> list[dict[str, Any]]:
@@ -283,31 +319,50 @@ class FullEnrichClient:
                 time.sleep(poll_seconds)
                 continue
             try:
-                if r.status_code >= 400:
-                    time.sleep(poll_seconds)
-                    continue
                 payload = r.json()
             except ValueError:
+                payload = None
+            if r.status_code == 402:
+                # Job ended CREDITS_INSUFFICIENT. Keep whatever it did finish.
+                self._mark_credits_exhausted()
+                return _contacts_of(payload)
+            if r.status_code >= 400 or not isinstance(payload, dict):
                 time.sleep(poll_seconds)
                 continue
             status = str(
                 payload.get("status") or payload.get("enrichment_status") or ""
             ).upper()
-            contacts = (
-                payload.get("datas")
-                or payload.get("data")
-                or payload.get("contacts")
-                or payload.get("results")
-                or []
-            )
-            if isinstance(contacts, dict):
-                contacts = contacts.get("contacts") or contacts.get("results") or []
+            contacts = _contacts_of(payload)
             if status in {"FINISHED", "DONE", "COMPLETED", "SUCCESS"}:
-                return [c for c in contacts if isinstance(c, dict)]
-            if status in {"FAILED", "ERROR", "CANCELED", "CANCELLED"}:
+                self._poll_state = "finished"
+                return contacts
+            if status == "CREDITS_INSUFFICIENT":
+                self._mark_credits_exhausted()
+                return contacts
+            if status in {
+                "FAILED", "ERROR", "CANCELED", "CANCELLED", "RATE_LIMIT", "UNKNOWN",
+            }:
+                self._poll_state = "failed"
+                self.errors += 1
                 return []
             time.sleep(poll_seconds)
+        self._poll_state = "timeout"
         return []
+
+
+def _contacts_of(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    contacts = (
+        payload.get("datas")
+        or payload.get("data")
+        or payload.get("contacts")
+        or payload.get("results")
+        or []
+    )
+    if isinstance(contacts, dict):
+        contacts = contacts.get("contacts") or contacts.get("results") or []
+    return [c for c in contacts if isinstance(c, dict)]
 
 
 def _work_email_from_contact(contact: dict[str, Any]) -> str:
