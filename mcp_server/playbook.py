@@ -24,6 +24,13 @@ which auto-ensures) to create write tables — no deploy needed for a new client
 
 Never omit `client_tag`. Never write to a shared contacts table.
 
+## DEPRECATED (phone): Phone lookups are deprecated here. Use the phone-waterfall MCP instead.
+Phone/cellphone lookups (find_phone, need='phone', the phone part of
+need='both', verify_only, Veriphone checks, FullEnrich `contact.phones`) are
+deprecated in this MCP. Use the phone-waterfall MCP instead. Email paths are
+unchanged. Phone behavior still runs today and will be disabled/removed in a
+follow-up after the phone-waterfall MCP is verified.
+
 ## Default flow
 1. `enrich_waterfall` always auto-runs `ensure_client` first, including builtin
    tags (`peterson`, `basco`). Do not skip this — a missing `peterson_companies`
@@ -38,7 +45,8 @@ Never omit `client_tag`. Never write to a shared contacts table.
 7. For one Slack-card prospect (ReplyHandler), call `enrich_person` or
    `POST /enrich-one`. That returns the compact hit. Default
    `write_supabase=false`, `need=both`, `max_tier=fullenrich`. FullEnrich
-   finds cellphones via `contact.phones`.
+   finds cellphones via `contact.phones` (DEPRECATED (phone): use the
+   phone-waterfall MCP for phone lookups).
 
 ## Table source
 Maps-scraper style params, mutually exclusive with `rows`:
@@ -68,6 +76,7 @@ last_name_key)` so a re-run does not duplicate a null-email person.
 Omitted `map` auto-picks `owner_title` → title, `candidate_email` → email,
 and `phone` / `cellphone` / `wf_phone` → phone.
 
+DEPRECATED (phone): Phone lookups are deprecated here. Use the phone-waterfall MCP instead.
 `verify_only=true` runs Veriphone on numbers already on the row and writes
 the verdict. Finder HTTP is skipped — use this to classify numbers you
 already have without paying later paid finders again.
@@ -128,6 +137,7 @@ AI Ark is fully used on all three lanes (not people-only):
   (5 credits on hit). People search is 0.5 cr on a result; email found is
   1 cr. Misses are $0. Prospeo email is 1 cr on hit, mobile 10 cr.
 
+DEPRECATED (phone): Phone lookups are deprecated here. Use the phone-waterfall MCP instead.
 Cellphones fall through AI Ark → Prospeo → FullEnrich `contact.phones` if
 max_tier allows. Vendor-found numbers are Veriphone-checked (`phone_valid`
 and `phone_type=mobile`) before they are accepted. Input `phone` /
@@ -145,6 +155,8 @@ any HTTP call. It is independent of `max_tier` (depth).
 | people_email | people + email finders | any phone/mobile endpoint |
 | both | email + phone + people (phone is on) | — |
 
+DEPRECATED (phone): Phone lookups are deprecated here. Use the phone-waterfall MCP instead. (find_phone,
+need='phone', and the phone part of need='both'.)
 Optional `find_people` / `find_email` / `find_phone` override `need` when any
 is passed. Phone is off unless `find_phone=true` or need is `both` / `phone`.
 
@@ -162,7 +174,8 @@ title, email, linkedin_url, phone / cellphone / mobile, place_id, city, state.
 
 WHEN_TO_USE = """
 Use this MCP when the user already has company domains (or known people) and
-needs decision-maker names, work emails, and/or cellphones written to isolated
+needs decision-maker names, work emails, and/or cellphones (cellphones are
+DEPRECATED here: use the phone-waterfall MCP) written to isolated
 per-client Supabase tables (basco, peterson, or any new snake_case client_tag).
 
 Do NOT use this MCP for Google Maps scraping, website crawling, permit data,

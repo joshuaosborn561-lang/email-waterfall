@@ -2,6 +2,17 @@
 
 Standalone **DM / work-email enrichment waterfall**. It takes company domains (plus optional known people), walks paid vendors, and writes isolated rows to Supabase.
 
+## Phone lookups are deprecated
+
+> ⚠️ **Phone lookups are deprecated here. Use the phone-waterfall MCP instead.**
+
+Phone-waterfall MCP: <https://github.com/joshuaosborn561-lang/phone-waterfall-mcp>
+
+- Decided by Josh on Nov 12, 2026.
+- **Email paths are unchanged.** This release (1.6.2) changes docs, tool descriptions, and a static `deprecations` field in `health` only. No runtime behavior, defaults, or routing changed.
+- Phone code here (`find_phone`, `need='phone'`, the phone part of `need='both'`, `verify_only`, Veriphone, FullEnrich `contact.phones`, the phone part of `enrich_person` / `POST /enrich-one`) still runs today. It will be disabled/removed in a follow-up PR **after the phone-waterfall MCP is verified**. ReplyHandler and any other `/enrich-one` callers must switch to phone-waterfall first.
+- Veriphone difference: the current Veriphone call here is `GET /v2/verify` with `mode=current`, but it gates on `phone_type` (the original/static line type) rather than `current_line_type`. phone-waterfall uses `/v3/verify` with `mode=current` and gates on `current_line_type == mobile`.
+
 It is **not** a Google Maps scraper and **not** a website crawler. Those stay in `googlemaps-scraper` / `google-maps-mcp`. This service only consumes domains and people that already exist. Apify contact-info scrapers are not called.
 
 ## Clients
@@ -29,7 +40,7 @@ IT rows:    [find LinkedIn URL if missing] → Blitz → getleads → Smartlead 
 other rows: getleads → Smartlead → AI Ark → pattern → Prospeo
 ```
 
-ReplyHandler single-person path (`enrich_person` / `POST /enrich-one`): the same order, then **FullEnrich** after Prospeo (email and cellphone). **FullEnrich is ReplyHandler only** (Josh, Oct 25 2026): bulk jobs never call it. A bulk `max_tier="fullenrich"` is treated as `prospeo` with the warning `fullenrich is reply-handler only; capped at prospeo`, `skip_tiers` containing it is a no-op, and bulk estimates show FullEnrich as `allowed: false`, `$0`. Internally this is the `allow_fullenrich` flag on `Waterfall`, true only from the enrich-one path.
+ReplyHandler single-person path (`enrich_person` / `POST /enrich-one`): the same order, then **FullEnrich** after Prospeo (email and cellphone; the cellphone part is **deprecated**, see [Phone lookups are deprecated](#phone-lookups-are-deprecated)). **FullEnrich is ReplyHandler only** (Josh, Oct 25 2026): bulk jobs never call it. A bulk `max_tier="fullenrich"` is treated as `prospeo` with the warning `fullenrich is reply-handler only; capped at prospeo`, `skip_tiers` containing it is a no-op, and bulk estimates show FullEnrich as `allowed: false`, `$0`. Internally this is the `allow_fullenrich` flag on `Waterfall`, true only from the enrich-one path.
 
 ### Pattern tier
 
@@ -76,7 +87,9 @@ AI Ark is next on **people, email, and cellphone** (not people-only):
 
 - People/DM: People Search by domain + ranked titles
 - Email: LinkedIn URL, AI Ark person id, name + domain, and/or phone → `POST /v2/people/export/single`
-- Cellphone: LinkedIn URL or name + domain → `POST /v2/people/mobile-phone-finder` (5 credits on hit)
+- Cellphone (**deprecated**, use phone-waterfall MCP): LinkedIn URL or name + domain → `POST /v2/people/mobile-phone-finder` (5 credits on hit)
+
+> **DEPRECATED (phone):** Phone lookups are deprecated here. Use the phone-waterfall MCP instead. The mobile / Veriphone / `verify_only` paragraphs below describe current behavior that will be removed in a follow-up.
 
 Mobile order is **AI Ark → Prospeo** (bulk) and **AI Ark → Prospeo → FullEnrich** (ReplyHandler path). Vendor-found numbers are checked with Veriphone `GET /v2/verify` before they are accepted (`phone_valid` and `phone_type=mobile`). Landline / voip / invalid are dropped and the next finder is tried. FullEnrich is last-tier **email and cellphone** (`contact.work_emails` and `contact.phones`; skip `LANDLINE`).
 
@@ -93,9 +106,9 @@ On `need='phone'` (or `verify_only`), input numbers are also Veriphone-checked. 
 | `need` | May call | Must not call |
 |---|---|---|
 | `email` | email finders only | any phone/mobile endpoint |
-| `phone` | phone finders (+ people search) + Veriphone mobile check | any email finder |
+| `phone` (**deprecated**) | phone finders (+ people search) + Veriphone mobile check | any email finder |
 | `dm` | people-discovery only | phone and email finders |
-| `both` | email + phone + people | — |
+| `both` | email + phone (phone part **deprecated**) + people | — |
 
 `need='email'` never calls AI Ark `mobile-phone-finder` or later phone finders. Job results include `suppressed_by_need` (eligible phone lookups not issued).
 
@@ -165,6 +178,8 @@ Inline `rows` still works as before (domain and/or name+company). Response is **
 Other tools: `health`, `ensure_client`, `list_clients`, `describe_client`, `get_job_status`, `list_background_jobs`, `getleads_search`, `enrich_person`.
 
 ## MCP tool: `enrich_person` / `POST /enrich-one`
+
+> **DEPRECATED (phone):** Phone lookups are deprecated here. Use the phone-waterfall MCP instead. The `phone` field / cellphone lookup on this path still works today because ReplyHandler uses it; it will be removed once ReplyHandler switches to phone-waterfall.
 
 One-person lookup for ReplyHandler Slack cards. Walks the same waterfall and returns **that compact hit** (`email`, `phone`, `linkedin_url`, `website`, source tiers) — not a bulk payload dump.
 
