@@ -23,7 +23,7 @@ mcp = MCPServer(
         "Not a Maps scraper or website crawler."
     ),
     instructions=INSTRUCTIONS,
-    version="1.6.1",
+    version="1.6.2",
 )
 
 
@@ -215,6 +215,12 @@ def health() -> str:
             "max_tier_default": "prospeo",
             "approve_cost_usd_default": 5.0,  # DEFAULT_APPROVE_COST_USD
             "auth": "none",
+            "deprecations": {
+                "phone_lookups": (
+                    "Phone lookups are deprecated here. "
+                    "Use the phone-waterfall MCP instead."
+                ),
+            },
             "note": (
                 "Any snake_case client_tag works. Call ensure_client or "
                 "auto-ensures on enrich_waterfall."
@@ -497,6 +503,10 @@ def enrich_waterfall(
 ) -> str:
     """Resolve DMs + work emails + cellphones via paid vendors; write public.{client}_*.
 
+    DEPRECATED (phone): Phone lookups are deprecated here. Use the phone-waterfall MCP instead.
+    (Email paths are unchanged. Phone flags still work today; phone code will
+    be disabled/removed in a follow-up.)
+
     Bulk email tier order (FullEnrich is ReplyHandler only, never here):
       IT rows:    [find LinkedIn] -> blitz -> getleads -> smartlead -> aiark -> pattern -> prospeo
       other rows: getleads -> smartlead -> aiark -> pattern -> prospeo
@@ -539,6 +549,7 @@ def enrich_waterfall(
     written), title_miss (getleads contacts, no title match), processing
     (live lease), or not_found (zero contacts).
 
+    DEPRECATED (phone): Phone lookups are deprecated here. Use the phone-waterfall MCP instead.
     `verify_only` = true checks existing phone numbers with Veriphone and
     writes the number + line type. No finder HTTP. Use this to classify
     numbers already on the queue without paying later paid finders again.
@@ -551,6 +562,8 @@ def enrich_waterfall(
     ensure_client first — including builtin peterson/basco — so write tables
     exist before the first upsert. Never omit client_tag.
 
+    DEPRECATED (phone): Phone lookups are deprecated here. Use the phone-waterfall MCP instead.
+    (Applies to find_phone, need='phone' and the phone part of need='both'.)
     Optional find_people / find_email / find_phone override `need` when any
     of the three is passed. Phone is off unless find_phone=true or need is
     'both' / 'phone'. If none of the flags is passed, need mapping is unchanged.
@@ -702,6 +715,10 @@ def enrich_person(
     it_lane: bool | None = None,
 ) -> str:
     """Look up one prospect through the waterfall and return that compact hit.
+
+    DEPRECATED (phone): Phone lookups are deprecated here. Use the phone-waterfall MCP instead.
+    This applies to the phone/cellphone part of this tool. ReplyHandler still
+    uses it today, so phone behavior is unchanged until callers switch.
 
     For ReplyHandler Slack cards. Returns email / phone / linkedin_url /
     website / source tiers — not a bulk payload dump. This is the ReplyHandler
