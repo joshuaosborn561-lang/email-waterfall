@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import inspect
 
 from email_waterfall import waterfall
@@ -9,6 +11,7 @@ from email_waterfall.vendors.base import EmailHit, PhoneHit
 from tests.test_waterfall import _patch_clients, _vendor
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_enrich_one_person_returns_compact_hit(monkeypatch) -> None:
     ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))
     ark.find_mobile.return_value = PhoneHit(
@@ -43,6 +46,7 @@ def test_enrich_one_person_returns_compact_hit(monkeypatch) -> None:
     assert hit["website"] == "https://roofco.com"
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_enrich_one_falls_through_to_fullenrich_phone(monkeypatch) -> None:
     fe = _vendor(enabled=True)
     fe.find_email.return_value = None
@@ -150,6 +154,7 @@ def test_enrich_one_reports_fullenrich_outcome(monkeypatch) -> None:
     assert fullenrich_outcome(fe)["enabled"] is False
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_enrich_one_hit_has_fullenrich_block_even_with_test_doubles(monkeypatch) -> None:
     ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))
     ark.find_mobile.return_value = PhoneHit(phone="+12015550100", source_tier="aiark")

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from email_waterfall.need import resolve_need, using_need
+from email_waterfall.need import (
+    PHONE_DISABLED_STATUS,
+    PHONE_DISABLED_WARNING,
+    phone_disabled_info,
+    phone_gate,
+    resolve_need,
+    using_need,
+)
 
 from email_waterfall._wf.const import (
     DEFAULT_APPROVE_COST_USD_ONE,
@@ -68,7 +75,96 @@ def fullenrich_outcome(client: Any) -> dict[str, Any]:
     }
 
 
+def _disable_phone_fields(hit: dict[str, Any], *, requested_need: str) -> dict[str, Any]:
+    """Kill switch off: keep every ReplyHandler key, blank the phone ones.
+
+    phone / phone_tier / phone_type stay "" (the existing no-phone value) and
+    sources.phone stays None so string handling in ReplyHandler keeps
+    working. phone_status="disabled" says why; fullenrich.mobile is the
+    existing "not_run" value with mobile_reason="disabled".
+    """
+    hit["phone"] = ""
+    hit["phone_tier"] = ""
+    hit["phone_type"] = ""
+    sources = hit.get("sources")
+    if isinstance(sources, dict):
+        sources["phone"] = None
+    fe = dict(hit.get("fullenrich") or {})
+    fe.setdefault("enabled", False)
+    fe.setdefault("credits_exhausted", False)
+    fe["mobile"] = "not_run"
+    fe["mobile_reason"] = PHONE_DISABLED_STATUS
+    hit["fullenrich"] = fe
+    hit["phone_status"] = PHONE_DISABLED_STATUS
+    hit["need_requested"] = requested_need
+    hit["phone_lookups"] = phone_disabled_info()
+    warnings = list(hit.get("warnings") or [])
+    if PHONE_DISABLED_WARNING not in warnings:
+        warnings.append(PHONE_DISABLED_WARNING)
+    hit["warnings"] = warnings
+    return hit
+
+
 def enrich_one_person(
+    *,
+    client_tag: str,
+    need: str = "both",
+    max_tier: str = "fullenrich",
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Run the waterfall for one prospect and return that compact hit.
+
+    PHONE_LOOKUPS_ENABLED=false (default): need='both' runs as people_email
+    (email + LinkedIn + people; FullEnrich still runs for email only, without
+    contact.phones); need='phone' returns at once with no paid work. Phone
+    fields come back empty with phone_status="disabled". With the switch on,
+    behavior is unchanged.
+    """
+    if not (client_tag or "").strip():
+        raise ValueError("client_tag is required")
+    gate = phone_gate(need)
+    if gate.phone_only:
+        email = str(kwargs.get("email") or "").strip().lower()
+        linkedin = str(kwargs.get("linkedin_url") or "").strip()
+        domain = str(kwargs.get("domain") or "").strip().lower()
+        hit: dict[str, Any] = {
+            "ok": True,
+            "status": "phone_lookups_disabled",
+            "reason": PHONE_DISABLED_WARNING,
+            "email": email,
+            "phone": "",
+            "linkedin_url": linkedin,
+            "website": f"https://{domain}" if domain else "",
+            "domain": domain,
+            "first_name": str(kwargs.get("first_name") or ""),
+            "last_name": str(kwargs.get("last_name") or ""),
+            "email_tier": "input" if email else "",
+            "phone_tier": "",
+            "dm_tier": "",
+            "phone_type": "",
+            "max_tier": str(max_tier or ""),
+            "need": gate.requested_need,
+            "client_tag": client_tag.strip(),
+            "spend": 0,
+            "estimated_cost_usd": 0.0,
+            "warnings": [],
+            "sources": {
+                "email": "input" if email else None,
+                "phone": None,
+                "linkedin": None,
+            },
+            "fullenrich": {"enabled": False, "credits_exhausted": False},
+        }
+        return _disable_phone_fields(hit, requested_need=gate.requested_need)
+    hit = _enrich_one_person_impl(
+        client_tag=client_tag, need=need, max_tier=max_tier, **kwargs
+    )
+    if gate.disabled:
+        _disable_phone_fields(hit, requested_need=gate.requested_need)
+    return hit
+
+
+def _enrich_one_person_impl(
     *,
     client_tag: str,
     email: str = "",

@@ -19,6 +19,13 @@ def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = _env(name).lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class Settings:
     supabase_url: str
@@ -38,6 +45,10 @@ class Settings:
     millionverifier_api_key: str = ""
     blitz_api_key: str = ""
     serper_api_key: str = ""
+    # Kill switch (v1.7.0). Phone lookups moved to the phone-waterfall MCP.
+    # False (default): no phone/mobile vendor endpoint is ever called.
+    # True: emergency rollback to the pre-1.7.0 phone behavior.
+    phone_lookups_enabled: bool = False
 
     @property
     def supabase_key(self) -> str:
@@ -74,6 +85,7 @@ def load_settings() -> Settings:
         millionverifier_api_key=_env("MILLIONVERIFIER_API_KEY"),
         blitz_api_key=_env("BLITZ_API_KEY"),
         serper_api_key=_env("SERPER_API_KEY"),
+        phone_lookups_enabled=_env_bool("PHONE_LOOKUPS_ENABLED", False),
     )
 
 

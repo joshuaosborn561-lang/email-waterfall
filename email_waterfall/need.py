@@ -25,12 +25,24 @@ passed. Phone lookups stay off unless find_phone is true or need is
 verify_only (enrich_waterfall flag, not a need value) runs Veriphone on
 numbers already on the row and writes wf_phone / line_type. Finder HTTP
 is skipped.
+
+PHONE_LOOKUPS_ENABLED kill switch (v1.7.0, default false)
+---------------------------------------------------------
+Phone lookups moved to the phone-waterfall MCP. While the switch is off the
+`phone` capability is stripped from every resolved / bound capability set
+(resolve_need, capabilities, set_need) and assert_capability(CAP_PHONE)
+always raises, so no phone/mobile endpoint can be reached even by a code
+path that forgets to check. need='both' runs as people_email; need='phone'
+(phone requested without email) and verify_only short-circuit with
+PHONE_DISABLED_WARNING and no paid work. PHONE_LOOKUPS_ENABLED=true restores
+the old behavior exactly.
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Iterator, Iterable
 
 CAP_EMAIL = "email"
@@ -98,6 +110,77 @@ class NeedViolation(RuntimeError):
     """Vendor endpoint capability is not in the current `need` allowlist."""
 
 
+PHONE_DISABLED_WARNING = "phone lookups disabled: use the phone-waterfall MCP"
+PHONE_DISABLED_STATUS = "disabled"
+
+
+def phone_lookups_enabled() -> bool:
+    """PHONE_LOOKUPS_ENABLED kill switch. Read live so a settings reload applies."""
+    from email_waterfall import config
+
+    return bool(getattr(config.settings, "phone_lookups_enabled", False))
+
+
+def _strip_phone(caps: frozenset[str]) -> frozenset[str]:
+    if CAP_PHONE in caps and not phone_lookups_enabled():
+        return caps - {CAP_PHONE}
+    return caps
+
+
+@dataclass(frozen=True)
+class PhoneGate:
+    """What the caller asked for vs what runs under the kill switch.
+
+    disabled:   phone work was requested and dropped by the kill switch.
+    phone_only: nothing but phone work was requested (need='phone',
+                find_phone without find_email, or verify_only), so the call
+                returns immediately with PHONE_DISABLED_WARNING.
+    """
+
+    requested_need: str
+    requested_caps: frozenset[str]
+    need: str
+    caps: frozenset[str]
+    disabled: bool
+    phone_only: bool
+
+
+def phone_gate(
+    need: str | None = None,
+    *,
+    find_people: bool | None = None,
+    find_email: bool | None = None,
+    find_phone: bool | None = None,
+    verify_only: bool = False,
+) -> PhoneGate:
+    if not _flags_passed(find_people, find_email, find_phone):
+        req_need = normalize_need(need)
+        req_caps = NEED_CAPABILITIES[req_need]
+    else:
+        req_caps = caps_from_flags(
+            bool(find_people), bool(find_email), bool(find_phone)
+        )
+        req_need = label_for_caps(req_caps)
+    if phone_lookups_enabled():
+        return PhoneGate(req_need, req_caps, req_need, req_caps, False, False)
+    wants_phone = CAP_PHONE in req_caps or bool(verify_only)
+    caps = req_caps - {CAP_PHONE}
+    label = label_for_caps(caps) if caps != req_caps else req_need
+    phone_only = bool(verify_only) or (
+        CAP_PHONE in req_caps and CAP_EMAIL not in req_caps
+    )
+    return PhoneGate(req_need, req_caps, label, caps, wants_phone, phone_only)
+
+
+def phone_disabled_info() -> dict[str, object]:
+    """`phone_lookups` block added to results while the kill switch is off."""
+    return {
+        "enabled": False,
+        "status": PHONE_DISABLED_STATUS,
+        "message": PHONE_DISABLED_WARNING,
+    }
+
+
 def normalize_need(need: str | None) -> str:
     need_norm = (need or "both").strip().lower()
     if need_norm not in NEED_VALUES:
@@ -155,24 +238,27 @@ def resolve_need(
     find_email: bool | None = None,
     find_phone: bool | None = None,
 ) -> tuple[str, frozenset[str]]:
-    """Return (need_label, capabilities). Flags override need when any is passed."""
-    if not _flags_passed(find_people, find_email, find_phone):
-        need_norm = normalize_need(need)
-        return need_norm, NEED_CAPABILITIES[need_norm]
-    caps = caps_from_flags(bool(find_people), bool(find_email), bool(find_phone))
-    return label_for_caps(caps), caps
+    """Return (need_label, capabilities). Flags override need when any is passed.
+
+    With PHONE_LOOKUPS_ENABLED off the phone capability is dropped (and the
+    label follows, e.g. both -> people_email).
+    """
+    gate = phone_gate(
+        need, find_people=find_people, find_email=find_email, find_phone=find_phone
+    )
+    return gate.need, gate.caps
 
 
 def capabilities(need: str) -> frozenset[str]:
     if need == _current_need.get():
-        return _current_caps.get()
+        return _strip_phone(_current_caps.get())
     if need in NEED_CAPABILITIES:
-        return NEED_CAPABILITIES[need]
-    return NEED_CAPABILITIES[normalize_need(need)]
+        return _strip_phone(NEED_CAPABILITIES[need])
+    return _strip_phone(NEED_CAPABILITIES[normalize_need(need)])
 
 
 def current_capabilities() -> frozenset[str]:
-    return _current_caps.get()
+    return _strip_phone(_current_caps.get())
 
 
 def allows(need: str, capability: str) -> bool:
@@ -191,7 +277,7 @@ def set_need(need: str, caps: frozenset[str] | None = None) -> object:
         need_norm = need
         cap_val = caps
     token_n = _current_need.set(need_norm)
-    token_c = _current_caps.set(cap_val)
+    token_c = _current_caps.set(_strip_phone(cap_val))
     return (token_n, token_c)
 
 
@@ -216,8 +302,16 @@ def assert_capability(
     vendor: str,
     endpoint: str,
 ) -> None:
-    """Raise if this endpoint's capability is not allowed by the current need."""
+    """Raise if this endpoint's capability is not allowed by the current need.
+
+    Phone endpoints always raise while PHONE_LOOKUPS_ENABLED is off.
+    """
     need = current_need()
+    if capability == CAP_PHONE and not phone_lookups_enabled():
+        raise NeedViolation(
+            f"{PHONE_DISABLED_WARNING} ({vendor} {endpoint}); "
+            "PHONE_LOOKUPS_ENABLED is false"
+        )
     if capability in current_capabilities():
         return
     raise NeedViolation(

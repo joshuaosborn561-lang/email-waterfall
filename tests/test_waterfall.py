@@ -706,6 +706,7 @@ def test_input_phone_writes_cellphone(monkeypatch) -> None:
     ark.find_mobile.assert_not_called()
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_aiark_mobile_finder_writes_cellphone(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(
@@ -742,6 +743,7 @@ def test_aiark_mobile_finder_writes_cellphone(monkeypatch) -> None:
     ark.find_mobile.assert_called()
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_prospeo_mobile_after_aiark_miss(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))
@@ -778,6 +780,7 @@ def test_prospeo_mobile_after_aiark_miss(monkeypatch) -> None:
     prospeo.find_mobile.assert_called()
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_need_phone_resolves_dm_and_mobile_not_email(monkeypatch) -> None:
     sink: dict = {}
     gl = _vendor(

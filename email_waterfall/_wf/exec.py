@@ -9,7 +9,16 @@ from typing import Any
 from email_waterfall import source as table_source
 from email_waterfall.clients import ClientConfig, parse_target_titles
 from email_waterfall.concurrency import company_concurrency
-from email_waterfall.need import CAP_EMAIL, CAP_PHONE, allows, resolve_need, using_need
+from email_waterfall.need import (
+    CAP_EMAIL,
+    CAP_PHONE,
+    PHONE_DISABLED_WARNING,
+    allows,
+    phone_disabled_info,
+    phone_gate,
+    resolve_need,
+    using_need,
+)
 
 from email_waterfall._wf.const import (
     FULLENRICH_BULK_WARNING,
@@ -405,7 +414,122 @@ def _enrich_waterfall_claimed(
     )
 
 
+def _phone_disabled_result(
+    rows: Any,
+    *,
+    client_tag: str,
+    gate: Any,
+    verify_only: bool,
+    estimate_only: bool,
+    max_tier: str,
+) -> dict[str, Any]:
+    """need='phone' / phone-only flags / verify_only with the kill switch off.
+
+    Returns before ensure_client, source reads, or any vendor HTTP.
+    """
+    rows_in: int | None = None
+    if _has_inline_rows(rows):
+        try:
+            rows_in = len(_parse_rows(rows))
+        except Exception:
+            rows_in = None
+    return {
+        "ok": True,
+        "status": "phone_lookups_disabled",
+        "reason": PHONE_DISABLED_WARNING,
+        "estimate_only": bool(estimate_only),
+        "rows_in": rows_in,
+        "companies_upserted": 0,
+        "contacts_written": 0,
+        "emails_found": 0,
+        "dms_found": 0,
+        "phones_found": 0,
+        "companies_done": 0,
+        "companies_total": 0,
+        "tier_stats": {},
+        "estimate": {},
+        "need": gate.requested_need,
+        "need_requested": gate.requested_need,
+        "need_capabilities": [],
+        "suppressed_by_need": {"phone_disabled_rows": rows_in or 0},
+        "verify_only": bool(verify_only),
+        "max_tier": max_tier,
+        "client_tag": (client_tag or "").strip(),
+        "spend": 0,
+        "estimated_cost_usd": 0.0,
+        "warnings": [PHONE_DISABLED_WARNING],
+        "phone_lookups": phone_disabled_info(),
+    }
+
+
+def _mark_phone_disabled(out: dict[str, Any], gate: Any) -> dict[str, Any]:
+    """Annotate a result when the kill switch dropped requested phone work."""
+    if not isinstance(out, dict):
+        return out
+    warnings = list(out.get("warnings") or [])
+    if PHONE_DISABLED_WARNING not in warnings:
+        warnings.append(PHONE_DISABLED_WARNING)
+    out["warnings"] = warnings
+    out["need_requested"] = gate.requested_need
+    out["phone_lookups"] = phone_disabled_info()
+    return out
+
+
 def enrich_waterfall(
+    rows: Any = None,
+    *,
+    client_tag: str,
+    need: Need = "both",
+    max_tier: str = DEFAULT_MAX_TIER,
+    verify_only: bool = False,
+    estimate_only: bool = False,
+    find_people: bool | None = None,
+    find_email: bool | None = None,
+    find_phone: bool | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Walk paid vendors per row; upsert isolated client tables; return counts.
+
+    PHONE_LOOKUPS_ENABLED=false (default): phone work is dropped. need='phone'
+    / phone-only flags / verify_only return status=phone_lookups_disabled
+    with no paid work; need='both' runs as people_email and the result
+    carries the warning, need_requested and a phone_lookups block. With
+    the switch on, behavior is unchanged. See _enrich_waterfall_impl.
+    """
+    gate = phone_gate(
+        need,
+        find_people=find_people,
+        find_email=find_email,
+        find_phone=find_phone,
+        verify_only=bool(verify_only),
+    )
+    if gate.phone_only:
+        return _phone_disabled_result(
+            rows,
+            client_tag=client_tag,
+            gate=gate,
+            verify_only=bool(verify_only),
+            estimate_only=bool(estimate_only),
+            max_tier=str(max_tier or DEFAULT_MAX_TIER),
+        )
+    out = _enrich_waterfall_impl(
+        rows,
+        client_tag=client_tag,
+        need=need,
+        max_tier=max_tier,
+        verify_only=verify_only,
+        estimate_only=estimate_only,
+        find_people=find_people,
+        find_email=find_email,
+        find_phone=find_phone,
+        **kwargs,
+    )
+    if gate.disabled:
+        _mark_phone_disabled(out, gate)
+    return out
+
+
+def _enrich_waterfall_impl(
     rows: Any = None,
     *,
     client_tag: str,

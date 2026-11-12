@@ -20,6 +20,7 @@ from email_waterfall.need import (
     function_worst_credits,
     normalize_need,
     set_need,
+    _strip_phone,
 )
 from email_waterfall.it_lane import it_row_reason
 from email_waterfall.people import looks_like_person, pick_best_person, title_rank
@@ -128,7 +129,8 @@ class Waterfall:
             self.caps = capabilities(self.need)
         else:
             self.need = need
-            self.caps = caps
+            # PHONE_LOOKUPS_ENABLED=false drops phone even from explicit caps.
+            self.caps = _strip_phone(caps)
         self.verify_only = bool(verify_only)
         self.target_titles = list(target_titles or [])
         self.fallback_titles = fallback_titles or frozenset()
