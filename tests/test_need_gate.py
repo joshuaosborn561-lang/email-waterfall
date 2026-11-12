@@ -64,6 +64,7 @@ def test_need_email_does_not_call_phone_finders(monkeypatch) -> None:
     assert not sink["contacts"][0].get("cellphone")
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_need_both_still_returns_phones(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))
@@ -142,6 +143,7 @@ def test_aiark_find_mobile_raises_when_need_is_email() -> None:
             client.find_mobile("Jane", "Smith", "roofco.com")
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_aiark_search_then_export_is_one_attempt(monkeypatch) -> None:
     """People Search + export/single + mobile = 1 attempt, 3 vendor_calls."""
     client = AiArkClient(api_key="tok")
@@ -252,6 +254,7 @@ def test_need_people_email_domain_only_no_phone_calls(monkeypatch) -> None:
         assert stats.get("phone_hits", 0) == 0
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_find_flags_all_true_matches_both(monkeypatch) -> None:
     def _run(**extra):
         sink: dict = {}
@@ -297,6 +300,7 @@ def test_find_flags_all_true_matches_both(monkeypatch) -> None:
     ark_flags.find_mobile.assert_called()
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_need_both_without_flags_still_calls_phone(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))

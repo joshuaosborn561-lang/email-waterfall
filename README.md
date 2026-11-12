@@ -2,16 +2,35 @@
 
 Standalone **DM / work-email enrichment waterfall**. It takes company domains (plus optional known people), walks paid vendors, and writes isolated rows to Supabase.
 
-## Phone lookups are deprecated
+## Phone lookups are disabled (deprecated)
 
-> ⚠️ **Phone lookups are deprecated here. Use the phone-waterfall MCP instead.**
+> ⚠️ **Phone lookups are disabled here by default (v1.7.0). Use the phone-waterfall MCP instead.**
 
 Phone-waterfall MCP: <https://github.com/joshuaosborn561-lang/phone-waterfall-mcp>
 
-- Decided by Josh on Nov 12, 2026.
-- **Email paths are unchanged.** This release (1.6.2) changes docs, tool descriptions, and a static `deprecations` field in `health` only. No runtime behavior, defaults, or routing changed.
-- Phone code here (`find_phone`, `need='phone'`, the phone part of `need='both'`, `verify_only`, Veriphone, FullEnrich `contact.phones`, the phone part of `enrich_person` / `POST /enrich-one`) still runs today. It will be disabled/removed in a follow-up PR **after the phone-waterfall MCP is verified**. ReplyHandler and any other `/enrich-one` callers must switch to phone-waterfall first.
-- Veriphone difference: the current Veriphone call here is `GET /v2/verify` with `mode=current`, but it gates on `phone_type` (the original/static line type) rather than `current_line_type`. phone-waterfall uses `/v3/verify` with `mode=current` and gates on `current_line_type == mobile`.
+- Decided by Josh on Nov 12, 2026. 1.6.2 deprecated phone lookups in docs only; **1.7.0 turns them off** behind a kill switch.
+- **Kill switch:** env `PHONE_LOOKUPS_ENABLED` (`config.Settings.phone_lookups_enabled`), **default `false`**. Accepts `1/true/yes/on`.
+- **Email, DM / people and LinkedIn paths are unchanged.**
+
+### With `PHONE_LOOKUPS_ENABLED=false` (default)
+
+- No phone/mobile vendor endpoint is ever called: AI Ark `mobile-phone-finder`, Prospeo `enrich_mobile`, FullEnrich `contact.phones`, Veriphone. The `phone` capability is stripped in `email_waterfall/need.py`, and `assert_capability("phone", ...)` always raises, so a code path that forgets to check still cannot spend.
+- FullEnrich still runs on the ReplyHandler path **for email** (`enrich_fields: ["contact.work_emails"]` only).
+- `need='both'` runs exactly like `need='people_email'` (email + people). The result keeps the normal shape and adds `need_requested: "both"`, `need: "people_email"`, the warning `"phone lookups disabled: use the phone-waterfall MCP"` in `warnings`, a `phone_lookups: {enabled: false, status: "disabled", message}` block, and `suppressed_by_need` counts (`aiark_phone`, `prospeo_phone`, …) for phone lookups that were not issued. `find_phone=true` together with `find_email=true` behaves the same way.
+- `need='phone'`, `find_phone=true` without `find_email`, and `verify_only=true` return immediately with `status: "phone_lookups_disabled"`, the warning, `spend: 0`, `estimated_cost_usd: 0` and `suppressed_by_need: {"phone_disabled_rows": N}` (N = inline rows; `null` `rows_in` for `source_table`, which is not read). No `ensure_client`, no source read, no background job, no vendor HTTP.
+- Estimates (`estimate_only=true`) leave out phone credits (e.g. AI Ark `need='both'` quotes 1.5 cr/row instead of 6.5; Prospeo 1 instead of 11).
+- `enrich_person` / `POST /enrich-one`: email / LinkedIn / website / people work as before. Every response key ReplyHandler reads is still present. Phone fields stay empty: `phone`, `phone_tier`, `phone_type` are `""` (the same value a phone miss returned before) and `sources.phone` is `null`. New: `phone_status: "disabled"`, `need_requested`, `phone_lookups`, and the warning in `warnings`. The FullEnrich report keeps its shape: `fullenrich.mobile` is the existing `"not_run"` value, plus a new `fullenrich.mobile_reason: "disabled"`. `need='phone'` returns at once with `status: "phone_lookups_disabled"`, `ok: true`.
+- `health` reports `"phone_lookups_enabled": false` and the deprecation note under `deprecations.phone_lookups`.
+
+### With `PHONE_LOOKUPS_ENABLED=true` (emergency rollback)
+
+Everything behaves exactly as 1.6.2: no extra keys, no warning, phone finders + Veriphone run. Set the env var and restart; no code revert needed.
+
+### Cleanup
+
+The phone code (vendor `find_mobile` methods, Veriphone client, `verify_only`, the phone half of the need gate) is **kept on purpose** so a rollback is just an env flip. Removing it is a later cleanup PR once the phone-waterfall MCP is verified in production.
+
+Veriphone difference (for whoever ports it): the Veriphone call here is `GET /v2/verify` with `mode=current`, but it gates on `phone_type` (the original/static line type) rather than `current_line_type`. phone-waterfall uses `/v3/verify` with `mode=current` and gates on `current_line_type == mobile`.
 
 It is **not** a Google Maps scraper and **not** a website crawler. Those stay in `googlemaps-scraper` / `google-maps-mcp`. This service only consumes domains and people that already exist. Apify contact-info scrapers are not called.
 
@@ -40,7 +59,7 @@ IT rows:    [find LinkedIn URL if missing] → Blitz → getleads → Smartlead 
 other rows: getleads → Smartlead → AI Ark → pattern → Prospeo
 ```
 
-ReplyHandler single-person path (`enrich_person` / `POST /enrich-one`): the same order, then **FullEnrich** after Prospeo (email and cellphone; the cellphone part is **deprecated**, see [Phone lookups are deprecated](#phone-lookups-are-deprecated)). **FullEnrich is ReplyHandler only** (Josh, Oct 25 2026): bulk jobs never call it. A bulk `max_tier="fullenrich"` is treated as `prospeo` with the warning `fullenrich is reply-handler only; capped at prospeo`, `skip_tiers` containing it is a no-op, and bulk estimates show FullEnrich as `allowed: false`, `$0`. Internally this is the `allow_fullenrich` flag on `Waterfall`, true only from the enrich-one path.
+ReplyHandler single-person path (`enrich_person` / `POST /enrich-one`): the same order, then **FullEnrich** after Prospeo (email, and cellphone only when `PHONE_LOOKUPS_ENABLED=true`; see [Phone lookups are disabled](#phone-lookups-are-disabled-deprecated)). **FullEnrich is ReplyHandler only** (Josh, Oct 25 2026): bulk jobs never call it. A bulk `max_tier="fullenrich"` is treated as `prospeo` with the warning `fullenrich is reply-handler only; capped at prospeo`, `skip_tiers` containing it is a no-op, and bulk estimates show FullEnrich as `allowed: false`, `$0`. Internally this is the `allow_fullenrich` flag on `Waterfall`, true only from the enrich-one path.
 
 ### Pattern tier
 
@@ -87,9 +106,9 @@ AI Ark is next on **people, email, and cellphone** (not people-only):
 
 - People/DM: People Search by domain + ranked titles
 - Email: LinkedIn URL, AI Ark person id, name + domain, and/or phone → `POST /v2/people/export/single`
-- Cellphone (**deprecated**, use phone-waterfall MCP): LinkedIn URL or name + domain → `POST /v2/people/mobile-phone-finder` (5 credits on hit)
+- Cellphone (**disabled unless `PHONE_LOOKUPS_ENABLED=true`**, use phone-waterfall MCP): LinkedIn URL or name + domain → `POST /v2/people/mobile-phone-finder` (5 credits on hit)
 
-> **DEPRECATED (phone):** Phone lookups are deprecated here. Use the phone-waterfall MCP instead. The mobile / Veriphone / `verify_only` paragraphs below describe current behavior that will be removed in a follow-up.
+> **DISABLED (phone):** Phone lookups are off by default. Use the phone-waterfall MCP instead. The mobile / Veriphone / `verify_only` paragraphs below apply only with `PHONE_LOOKUPS_ENABLED=true` (rollback) and will be removed in a later cleanup.
 
 Mobile order is **AI Ark → Prospeo** (bulk) and **AI Ark → Prospeo → FullEnrich** (ReplyHandler path). Vendor-found numbers are checked with Veriphone `GET /v2/verify` before they are accepted (`phone_valid` and `phone_type=mobile`). Landline / voip / invalid are dropped and the next finder is tried. FullEnrich is last-tier **email and cellphone** (`contact.work_emails` and `contact.phones`; skip `LANDLINE`).
 
@@ -106,9 +125,9 @@ On `need='phone'` (or `verify_only`), input numbers are also Veriphone-checked. 
 | `need` | May call | Must not call |
 |---|---|---|
 | `email` | email finders only | any phone/mobile endpoint |
-| `phone` (**deprecated**) | phone finders (+ people search) + Veriphone mobile check | any email finder |
+| `phone` (**disabled by default**: returns `phone_lookups_disabled`) | phone finders (+ people search) + Veriphone mobile check | any email finder |
 | `dm` | people-discovery only | phone and email finders |
-| `both` | email + phone (phone part **deprecated**) + people | — |
+| `both` | email + phone + people (phone part **disabled by default**: runs as `people_email`) | — |
 
 `need='email'` never calls AI Ark `mobile-phone-finder` or later phone finders. Job results include `suppressed_by_need` (eligible phone lookups not issued).
 
@@ -179,7 +198,7 @@ Other tools: `health`, `ensure_client`, `list_clients`, `describe_client`, `get_
 
 ## MCP tool: `enrich_person` / `POST /enrich-one`
 
-> **DEPRECATED (phone):** Phone lookups are deprecated here. Use the phone-waterfall MCP instead. The `phone` field / cellphone lookup on this path still works today because ReplyHandler uses it; it will be removed once ReplyHandler switches to phone-waterfall.
+> **DISABLED (phone):** with `PHONE_LOOKUPS_ENABLED=false` (default) this path returns email / LinkedIn / website as before, with `phone: ""`, `sources.phone: null`, `phone_status: "disabled"`, `fullenrich.mobile: "not_run"` + `fullenrich.mobile_reason: "disabled"`. Use the phone-waterfall MCP for phones. See [Phone lookups are disabled](#phone-lookups-are-disabled-deprecated).
 
 One-person lookup for ReplyHandler Slack cards. Walks the same waterfall and returns **that compact hit** (`email`, `phone`, `linkedin_url`, `website`, source tiers) — not a bulk payload dump.
 
@@ -265,3 +284,5 @@ Long runs return `job_id` — poll `get_job_status`.
 ```bash
 pytest -q
 ```
+
+Tests run with `PHONE_LOOKUPS_ENABLED=false` (an autouse fixture in `tests/conftest.py`). Tests that cover the legacy phone path opt in with `@pytest.mark.usefixtures("phone_lookups_on")`. `tests/test_phone_kill_switch.py` replaces the HTTP layer with a trap that fails the test if a phone endpoint is hit while disabled.

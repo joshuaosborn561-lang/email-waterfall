@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from email_waterfall.vendors.prospeo import ProspeoClient
 
 
@@ -129,6 +131,7 @@ def test_find_email_linkedin_only(monkeypatch) -> None:
     assert hit.email == "pat@x.com"
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_find_mobile_enrich_mobile(monkeypatch) -> None:
     client = ProspeoClient(api_key="pk_test")
 
@@ -157,6 +160,7 @@ def test_find_mobile_enrich_mobile(monkeypatch) -> None:
     assert client.errors == 0
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_find_mobile_no_match_is_not_an_error(monkeypatch) -> None:
     client = ProspeoClient(api_key="pk_test")
 

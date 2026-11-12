@@ -50,6 +50,7 @@ def _veriphone(
     return m
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_verify_mobile_uses_e164(monkeypatch) -> None:
     client = VeriphoneClient(api_key="test-key")
 
@@ -79,6 +80,7 @@ def test_verify_mobile_uses_e164(monkeypatch) -> None:
     assert client.calls == 1
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_verify_fixed_line_is_not_mobile(monkeypatch) -> None:
     client = VeriphoneClient(api_key="test-key")
 
@@ -101,6 +103,7 @@ def test_verify_fixed_line_is_not_mobile(monkeypatch) -> None:
     assert client.hits == 0
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_verify_voip_is_not_mobile(monkeypatch) -> None:
     client = VeriphoneClient(api_key="test-key")
 
@@ -129,6 +132,7 @@ def test_verify_raises_when_need_is_email() -> None:
             client.verify("201-555-0100")
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_need_phone_keeps_veriphone_mobile(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(enabled=True)
@@ -167,6 +171,7 @@ def test_need_phone_keeps_veriphone_mobile(monkeypatch) -> None:
     ark.find_mobile.assert_called()
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_need_phone_drops_landline_and_tries_next_vendor(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(enabled=True)
@@ -228,6 +233,7 @@ def test_need_phone_drops_landline_and_tries_next_vendor(monkeypatch) -> None:
     prospeo.find_mobile.assert_called()
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_need_phone_rejects_input_landline(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(enabled=True)
@@ -264,6 +270,7 @@ def test_need_phone_rejects_input_landline(monkeypatch) -> None:
     ark.find_mobile.assert_called()
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_need_both_verifies_vendor_mobile(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))
@@ -297,6 +304,7 @@ def test_need_both_verifies_vendor_mobile(monkeypatch) -> None:
     vp.verify.assert_called()
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_need_phone_unconfigured_keeps_number_and_warns(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(enabled=True)
@@ -334,6 +342,7 @@ def test_need_phone_unconfigured_keeps_number_and_warns(monkeypatch) -> None:
     assert sink["contacts"][0]["cellphone"] == "+19725550111"
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_need_phone_writes_source_phone_and_line_type(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(enabled=True)
@@ -398,6 +407,7 @@ def test_need_phone_writes_source_phone_and_line_type(monkeypatch) -> None:
     assert sink["contacts"][0]["line_type"] == "mobile"
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_verify_only_skips_finders_and_writes_verdict(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(enabled=True)
@@ -469,6 +479,7 @@ def test_verify_only_skips_finders_and_writes_verdict(monkeypatch) -> None:
     assert writebacks[0]["phone_type"] == "mobile"
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_verify_only_records_landline_without_finder(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(enabled=True)
@@ -508,6 +519,7 @@ def test_verify_only_records_landline_without_finder(monkeypatch) -> None:
     assert contact.get("cellphone") == "202-555-0100"
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_verify_only_estimate_has_no_finder_credits(monkeypatch) -> None:
     from tests.test_estimate import _mute_smartlead
 

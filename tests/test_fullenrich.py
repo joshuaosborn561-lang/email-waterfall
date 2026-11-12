@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from email_waterfall.need import NeedViolation, using_need
 from email_waterfall.vendors.fullenrich import (
     FullEnrichClient,
@@ -64,6 +66,7 @@ def test_work_email_from_most_probable() -> None:
     assert _work_email_from_contact(contact) == "jane@roofco.com"
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_find_email_also_returns_phone_when_need_allows(monkeypatch) -> None:
     posts: list[dict] = []
     client = FullEnrichClient(api_key="fe_test")
@@ -135,6 +138,7 @@ def test_find_email_need_email_omits_phones(monkeypatch) -> None:
     assert fields == [["contact.work_emails"]]
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_find_mobile_contact_phones(monkeypatch) -> None:
     client = FullEnrichClient(api_key="fe_test")
 
@@ -192,6 +196,7 @@ def _ok_post(tier, url, json=None, headers=None, timeout=60):
     return _Resp(200, {"enrichment_id": "enr_x"})
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_mobile_outcome_found(monkeypatch) -> None:
     def fake_get(tier, url, headers=None, timeout=60):
         return _Resp(200, _finished_contact({
@@ -205,6 +210,7 @@ def test_mobile_outcome_found(monkeypatch) -> None:
     assert client.credits_exhausted is False
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_mobile_outcome_no_match_when_finished_empty(monkeypatch) -> None:
     def fake_get(tier, url, headers=None, timeout=60):
         return _Resp(200, _finished_contact({"custom": {"idx": "0"}, "contact_info": {}}))
@@ -215,6 +221,7 @@ def test_mobile_outcome_no_match_when_finished_empty(monkeypatch) -> None:
     assert client.credits_exhausted is False
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_mobile_outcome_out_of_credits_on_post_402(monkeypatch) -> None:
     def post_402(tier, url, json=None, headers=None, timeout=60):
         return _Resp(402, {"code": "error.credits.insufficient"})
@@ -228,6 +235,7 @@ def test_mobile_outcome_out_of_credits_on_post_402(monkeypatch) -> None:
     assert client.credits_exhausted is True
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_mobile_outcome_out_of_credits_on_poll_402_returns_fast(monkeypatch) -> None:
     gets = []
 
@@ -242,6 +250,7 @@ def test_mobile_outcome_out_of_credits_on_poll_402_returns_fast(monkeypatch) -> 
     assert client.credits_exhausted is True
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_mobile_outcome_out_of_credits_on_status_field(monkeypatch) -> None:
     def fake_get(tier, url, headers=None, timeout=60):
         return _Resp(200, {"status": "CREDITS_INSUFFICIENT", "datas": []})
@@ -251,6 +260,7 @@ def test_mobile_outcome_out_of_credits_on_status_field(monkeypatch) -> None:
     assert client.mobile_outcome == "out_of_credits"
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_poll_402_keeps_contacts_finished_before_credits_ran_out(monkeypatch) -> None:
     def fake_get(tier, url, headers=None, timeout=60):
         return _Resp(402, {
@@ -267,6 +277,7 @@ def test_poll_402_keeps_contacts_finished_before_credits_ran_out(monkeypatch) ->
     assert client.credits_exhausted is True
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_mobile_outcome_timeout_when_never_finishes(monkeypatch) -> None:
     def fake_get(tier, url, headers=None, timeout=60):
         return _Resp(200, {"status": "IN_PROGRESS", "datas": []})
@@ -276,6 +287,7 @@ def test_mobile_outcome_timeout_when_never_finishes(monkeypatch) -> None:
     assert client.mobile_outcome == "timeout"
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_mobile_outcome_error_on_failed_status_and_http_500(monkeypatch) -> None:
     def failed_get(tier, url, headers=None, timeout=60):
         return _Resp(200, {"status": "FAILED", "datas": []})

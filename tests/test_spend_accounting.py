@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from email_waterfall import waterfall
 from email_waterfall.need import (
     AIARK_EMAIL_CREDITS,
@@ -79,6 +81,7 @@ def test_aiark_linkedin_email_hit_books_1_credit(monkeypatch) -> None:
     assert out["spend"] == _usd("aiark", 1.0)
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_aiark_mobile_hit_books_5_credits(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))
@@ -192,6 +195,7 @@ def test_prospeo_email_hit_books_1_credit(monkeypatch) -> None:
     assert out["spend"] == round(1.0 * 0.0148, 6)
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_prospeo_mobile_hit_books_10_credits(monkeypatch) -> None:
     sink: dict = {}
     ark = _vendor(email=EmailHit(email="jane@roofco.com", source_tier="aiark"))

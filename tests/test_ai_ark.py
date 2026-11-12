@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from email_waterfall.vendors.ai_ark import AiArkClient, _pick_email, _pick_mobile
 
 
@@ -195,6 +197,7 @@ def test_find_people_sends_ranked_titles(monkeypatch) -> None:
     assert client.last_credits == 0.5
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_find_mobile_linkedin(monkeypatch) -> None:
     client = AiArkClient(api_key="tok")
 
@@ -223,6 +226,7 @@ def test_find_mobile_linkedin(monkeypatch) -> None:
     assert client.last_credits == 5.0
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_find_mobile_name_domain(monkeypatch) -> None:
     client = AiArkClient(api_key="tok")
 
@@ -239,6 +243,7 @@ def test_find_mobile_name_domain(monkeypatch) -> None:
     assert hit.phone == "+19725550199"
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_find_mobile_miss_is_none(monkeypatch) -> None:
     client = AiArkClient(api_key="tok")
 

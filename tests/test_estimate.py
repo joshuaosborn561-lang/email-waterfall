@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from unittest.mock import MagicMock
 
 from email_waterfall import waterfall
@@ -119,6 +121,7 @@ def test_estimate_only_source_does_not_call_vendors(monkeypatch) -> None:
     assert out["suppressed_by_need"]["aiark_phone"] == 956
 
 
+@pytest.mark.usefixtures("phone_lookups_on")
 def test_estimate_only_both_quotes_aiark_email_plus_phone(monkeypatch) -> None:
     _mute_smartlead(monkeypatch)
     out = waterfall.enrich_waterfall(

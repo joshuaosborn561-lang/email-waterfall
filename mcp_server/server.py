@@ -23,7 +23,7 @@ mcp = MCPServer(
         "Not a Maps scraper or website crawler."
     ),
     instructions=INSTRUCTIONS,
-    version="1.6.2",
+    version="1.7.0",
 )
 
 
@@ -174,8 +174,11 @@ def health() -> str:
     _reload_settings()
     from email_waterfall.clients import list_registered_clients
     from email_waterfall.config import settings
+    from email_waterfall.need import phone_lookups_enabled
     from email_waterfall.vendors.ai_ark import AiArkClient
     from email_waterfall.vendors.getleads import GetLeadsClient
+
+    phone_on = phone_lookups_enabled()
 
     aiark = _paid_vendor_balance("aiark", AiArkClient(timeout=8))
     reasons = [
@@ -215,10 +218,18 @@ def health() -> str:
             "max_tier_default": "prospeo",
             "approve_cost_usd_default": 5.0,  # DEFAULT_APPROVE_COST_USD
             "auth": "none",
+            "phone_lookups_enabled": phone_on,
             "deprecations": {
                 "phone_lookups": (
                     "Phone lookups are deprecated here. "
-                    "Use the phone-waterfall MCP instead."
+                    "Use the phone-waterfall MCP instead. "
+                    + (
+                        "PHONE_LOOKUPS_ENABLED=true: legacy phone path is on "
+                        "(emergency rollback)."
+                        if phone_on
+                        else "Disabled (PHONE_LOOKUPS_ENABLED=false): no phone "
+                        "or mobile vendor endpoint is called."
+                    )
                 ),
             },
             "note": (
@@ -503,9 +514,14 @@ def enrich_waterfall(
 ) -> str:
     """Resolve DMs + work emails + cellphones via paid vendors; write public.{client}_*.
 
-    DEPRECATED (phone): Phone lookups are deprecated here. Use the phone-waterfall MCP instead.
-    (Email paths are unchanged. Phone flags still work today; phone code will
-    be disabled/removed in a follow-up.)
+    DISABLED (phone): with PHONE_LOOKUPS_ENABLED=false (default) no phone or
+    mobile endpoint is called; use the phone-waterfall MCP. need='both' runs
+    as people_email (result adds need_requested, a phone_lookups block and
+    the warning "phone lookups disabled: use the phone-waterfall MCP");
+    need='phone', find_phone without find_email, and verify_only return at
+    once with status=phone_lookups_disabled and no paid work. Estimates
+    leave out phone credits. Email / people / LinkedIn paths are unchanged.
+    PHONE_LOOKUPS_ENABLED=true restores the old phone behavior described below.
 
     Bulk email tier order (FullEnrich is ReplyHandler only, never here):
       IT rows:    [find LinkedIn] -> blitz -> getleads -> smartlead -> aiark -> pattern -> prospeo
@@ -549,8 +565,7 @@ def enrich_waterfall(
     written), title_miss (getleads contacts, no title match), processing
     (live lease), or not_found (zero contacts).
 
-    DEPRECATED (phone): Phone lookups are deprecated here. Use the phone-waterfall MCP instead.
-    `verify_only` = true checks existing phone numbers with Veriphone and
+    DISABLED (phone) unless PHONE_LOOKUPS_ENABLED=true. `verify_only` = true checks existing phone numbers with Veriphone and
     writes the number + line type. No finder HTTP. Use this to classify
     numbers already on the queue without paying later paid finders again.
 
@@ -562,8 +577,8 @@ def enrich_waterfall(
     ensure_client first — including builtin peterson/basco — so write tables
     exist before the first upsert. Never omit client_tag.
 
-    DEPRECATED (phone): Phone lookups are deprecated here. Use the phone-waterfall MCP instead.
-    (Applies to find_phone, need='phone' and the phone part of need='both'.)
+    DISABLED (phone) unless PHONE_LOOKUPS_ENABLED=true: find_phone, need='phone'
+    and the phone part of need='both' are ignored for phone work.
     Optional find_people / find_email / find_phone override `need` when any
     of the three is passed. Phone is off unless find_phone=true or need is
     'both' / 'phone'. If none of the flags is passed, need mapping is unchanged.
@@ -595,17 +610,38 @@ def enrich_waterfall(
     from email_waterfall import waterfall as wf
     from email_waterfall.clients import ensure_client
 
-    from email_waterfall.need import resolve_need
+    from email_waterfall.need import PHONE_DISABLED_WARNING, phone_gate
 
     try:
-        need_norm, _caps = resolve_need(
+        gate = phone_gate(
             need,
             find_people=find_people,
             find_email=find_email,
             find_phone=find_phone,
+            verify_only=bool(verify_only),
         )
     except Exception as exc:
         _tool_error(exc)
+    need_norm = gate.need
+    if gate.phone_only:
+        # PHONE_LOOKUPS_ENABLED=false: phone-only work returns at once,
+        # before ensure_client, source reads or a background job.
+        try:
+            return _json(
+                wf.enrich_waterfall(
+                    rows,
+                    client_tag=client_tag,
+                    need=need,  # type: ignore[arg-type]
+                    max_tier=max_tier,
+                    estimate_only=bool(estimate_only),
+                    verify_only=bool(verify_only),
+                    find_people=find_people,
+                    find_email=find_email,
+                    find_phone=find_phone,
+                )
+            )
+        except Exception as exc:
+            _tool_error(exc)
     client = ensure_client(client_tag, write_supabase=not estimate_only)
     max_tier_n = wf.normalize_max_tier(max_tier)
 
@@ -675,24 +711,34 @@ def enrich_waterfall(
                 "client_tag": client.tag,
                 "rows_chars": rows_chars,
                 "source_table": _table_ref(source, source_table),
+                **(
+                    {
+                        "need_requested": gate.requested_need,
+                        "warnings": [PHONE_DISABLED_WARNING],
+                    }
+                    if gate.disabled
+                    else {}
+                ),
             },
         )
-        return _json(
-            {
-                "job_id": job.id,
-                "status": job.status,
-                "message": f"Poll get_job_status with job_id={job.id}.",
-                "client_tag": client.tag,
-                "companies_table": client.companies_table,
-                "contacts_table": client.contacts_table,
-            }
-        )
+        started = {
+            "job_id": job.id,
+            "status": job.status,
+            "message": f"Poll get_job_status with job_id={job.id}.",
+            "client_tag": client.tag,
+            "companies_table": client.companies_table,
+            "contacts_table": client.contacts_table,
+        }
+        if gate.disabled:
+            started["warnings"] = [PHONE_DISABLED_WARNING]
+            started["need_requested"] = gate.requested_need
+        return _json(started)
     return _json(_run_enrich_or_raise())
 
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Enrich one person (phone + LinkedIn + email)",
+        title="Enrich one person (email + LinkedIn; phone disabled by default)",
         readOnlyHint=False,
         openWorldHint=True,
         destructiveHint=False,
@@ -716,13 +762,18 @@ def enrich_person(
 ) -> str:
     """Look up one prospect through the waterfall and return that compact hit.
 
-    DEPRECATED (phone): Phone lookups are deprecated here. Use the phone-waterfall MCP instead.
-    This applies to the phone/cellphone part of this tool. ReplyHandler still
-    uses it today, so phone behavior is unchanged until callers switch.
+    DISABLED (phone): with PHONE_LOOKUPS_ENABLED=false (default) the
+    phone/cellphone part is off; use the phone-waterfall MCP. Email /
+    LinkedIn / website still come back as before (FullEnrich runs for email
+    only). Every response key is kept: phone / phone_tier / phone_type are
+    "", sources.phone is null, phone_status="disabled",
+    fullenrich.mobile="not_run" with fullenrich.mobile_reason="disabled".
+    need='phone' returns at once with status=phone_lookups_disabled.
 
     For ReplyHandler Slack cards. Returns email / phone / linkedin_url /
     website / source tiers — not a bulk payload dump. This is the ReplyHandler
-    single-person path, the only place FullEnrich runs (email + cellphone),
+    single-person path, the only place FullEnrich runs (email; cellphone only
+    with PHONE_LOOKUPS_ENABLED=true),
     after Prospeo. Same IT / Blitz / pattern rules as enrich_waterfall;
     it_lane=true forces the person to IT.
     Default write_supabase=false so a Slack-card lookup does not create
